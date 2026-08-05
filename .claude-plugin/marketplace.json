@@ -1,0 +1,16 @@
+{
+  "name": "jimcline-plugins",
+  "description": "Claude Code plugins by Jim Cline.",
+  "owner": {
+    "name": "Jim Cline",
+    "email": "jamescline@outlook.com"
+  },
+  "plugins": [
+    {
+      "name": "idle-compactor",
+      "source": "./",
+      "version": "0.2.0",
+      "description": "Runs /compact automatically when a session goes idle, timed to land just before the Anthropic prompt cache expires."
+    }
+  ]
+}
