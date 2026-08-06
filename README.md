@@ -1,7 +1,15 @@
 # claude-compaction-tools
 
-Runs `/compact` automatically when a Claude Code session goes idle, timed to
-land just before the Anthropic prompt cache expires.
+Two Claude Code plugins for managing context compaction.
+
+- **idle-compactor** — runs `/compact` automatically when a session goes idle,
+  timed to land just before the Anthropic prompt cache expires, optionally with
+  your own focus instructions attached.
+- **compaction-capture** — writes each compaction summary to a file after the
+  fact, so the context a session dropped is still on disk.
+
+Everything up to [compaction-capture](#compaction-capture) describes
+`idle-compactor`.
 
 ## Why the timing matters
 
@@ -57,7 +65,10 @@ injection](#blind-injection).
 ```
 /plugin marketplace add JimCline/claude-compaction-tools
 /plugin install idle-compactor@jimcline-plugins
+/plugin install compaction-capture@jimcline-plugins
 ```
+
+The two are independent — install either on its own.
 
 On the first session after installing, the plugin asks you two things: the idle
 threshold, and the minimum context size worth compacting. Run `/idle-compact
@@ -117,6 +128,33 @@ into that other application instead. They are therefore **off by default**:
 
 Only enable this if you understand that trade-off.
 
+## Compaction prompt
+
+`/compact` accepts optional focus instructions, and the plugin can attach yours
+to every idle compaction so it types `/compact <your text>` instead of a bare
+`/compact`.
+
+```
+/idle-compact prompt        walk through writing one and choosing where it lives
+/idle-compact prompt show   what would be sent, and from which file
+/idle-compact prompt clear  stop sending one
+```
+
+The wizard writes your text to a file and records the path — either
+`.claude/compaction-prompt.md` in the repo (so it can be committed and shared),
+`~/.claude/compaction-prompt.md` at the user level (the fallback for every repo
+without its own), or any path you name. A repo-scoped prompt wins over the
+user-level one.
+
+Two things worth knowing:
+
+- **It applies only to compactions this plugin fires.** A `/compact` you type
+  yourself is not intercepted.
+- **Newlines are flattened to spaces.** The text is typed as a single terminal
+  line, so an embedded newline would submit the command early and leave the
+  remainder as a stray prompt. Anything past 800 characters is dropped, and
+  `prompt show` tells you when that happens.
+
 ## Safety gates
 
 Compaction only fires when all of these hold:
@@ -152,16 +190,83 @@ Environment variables override the file for a single session:
 | `CLAUDE_IDLE_COMPACT_MIN_TOKENS` | minimum context size |
 | `CLAUDE_IDLE_COMPACT_ALLOW_BLIND` | `1` to permit blind injection |
 
-## Development
+# compaction-capture
+
+A compaction discards context from the model's window, but the transcript on
+disk is append-only — the summary it produced stays in the `.jsonl` forever.
+This plugin copies that summary out to a file you can actually find.
 
 ```
-node test/run.js
+/compaction-capture on       pick a folder and start capturing, for this repo
+/compaction-capture off      stop capturing
+/compaction-capture status   where captures go, how many exist, whether the hook ran
+/compaction-capture where    show the preset folders for this repo
+/compaction-capture now      capture immediately, without waiting for a compaction
 ```
 
-The suite runs against a throwaway `HOME`, so it never touches your real
-`~/.claude/idle-compactor`. It covers token accounting, threshold derivation,
-the arm/disarm/re-arm lifecycle, every timer abort path, the CLI, and the
-first-run notice.
+It runs on the `PostCompact` hook, which fires after a compaction completes for
+both manual and automatic triggers. The hook reads the transcript, takes the
+last compaction summary in it, and writes one markdown file per compaction.
+
+## Where captures go
+
+`on` offers two presets plus anything you name:
+
+| Preset | Path |
+|---|---|
+| Inside this repo | `<repo>/.claude/compaction-captures/` |
+| Shared folder | `~/.claude/compaction-captures/<repo-name>/` |
+
+A repo-local folder needs no per-repo subdirectory — the repo is already the
+scope. The shared folder files by repo name so projects do not pile up
+together. If you pick a folder inside your repo, consider gitignoring it;
+captures are conversation summaries and run to tens of kilobytes.
+
+Either way **the choice itself is stored at the user level**, in
+`~/.claude/compaction-capture/config.json`, keyed by repo path — so nothing is
+added to a working tree just to record a preference, and captures stay off by
+default in every repo you have not turned on.
+
+## What a capture looks like
+
+One file per compaction, named for when the compaction happened and what
+triggered it — `2026-08-05-223612-manual.md` — with YAML front matter over the
+verbatim summary text:
+
+```yaml
+---
+captured_at: 2026-08-05T22:36:14.108Z
+compacted_at: 2026-08-05T22:36:12.994Z
+session: 08f958cb-bf78-45da-8c82-0992671a7dec
+repo: claude-compaction-tools
+branch: main
+trigger: manual
+pre_tokens: 242889
+post_tokens: 21842
+claude_code_version: 2.1.217
+chars: 19292
+---
+```
+
+The summary body is left exactly as Claude Code wrote it — no reformatting, no
+section parsing — so a later pass can make of it whatever it likes.
+
+Re-firing the hook on a compaction already captured writes nothing: each
+session records the summary `uuid` it last wrote.
+
+# Development
+
+```
+node test/run.js                      # idle-compactor
+node compaction-capture/test/run.js   # compaction-capture
+```
+
+Both suites run against a throwaway `HOME`, so they never touch your real
+`~/.claude`. The first covers token accounting, threshold derivation, the
+arm/disarm/re-arm lifecycle, every timer abort path, the compaction prompt, the
+CLI, and the first-run notice. The second covers summary extraction, the
+per-repo location store, the front matter, duplicate suppression, and the
+malformed-input paths.
 
 Manifests can be checked with `claude plugin validate .claude-plugin/plugin.json`
 and `claude plugin validate .claude-plugin/marketplace.json`.
@@ -170,8 +275,12 @@ and `claude plugin validate .claude-plugin/marketplace.json`.
 
 ```
 /plugin uninstall idle-compactor@jimcline-plugins
-rm -rf ~/.claude/idle-compactor
+/plugin uninstall compaction-capture@jimcline-plugins
+rm -rf ~/.claude/idle-compactor ~/.claude/compaction-capture
 ```
+
+Captures already written are left alone — delete
+`~/.claude/compaction-captures` too if you want them gone.
 
 ## License
 

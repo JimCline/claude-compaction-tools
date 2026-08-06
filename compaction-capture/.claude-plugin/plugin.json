@@ -1,0 +1,12 @@
+{
+  "name": "compaction-capture",
+  "version": "0.1.0",
+  "description": "Saves each compaction summary to a file after compaction completes, so the context a session dropped is still on disk.",
+  "author": {
+    "name": "Jim Cline",
+    "email": "jamescline@outlook.com"
+  },
+  "homepage": "https://github.com/JimCline/claude-compaction-tools",
+  "repository": "https://github.com/JimCline/claude-compaction-tools",
+  "license": "MIT"
+}

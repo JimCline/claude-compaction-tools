@@ -1,0 +1,16 @@
+{
+  "description": "Writes the summary to a file once a compaction completes.",
+  "hooks": {
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/capture.js\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}
