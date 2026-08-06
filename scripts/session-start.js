@@ -26,7 +26,7 @@ function sweep() {
 function setupContext(cfg) {
   const cli = path.join(__dirname, 'config-cli.js');
   return [
-    'The claude-idle-compactor plugin is installed but has not been configured yet.',
+    'The idle-compactor plugin is installed but has not been configured yet.',
     '',
     'Before doing anything else, run its one-time setup with the user:',
     '',
@@ -84,7 +84,7 @@ async function main() {
 
   emit({
     systemMessage:
-      'claude-idle-compactor is installed but not configured. Default idle threshold is ' +
+      'idle-compactor is installed but not configured. Default idle threshold is ' +
       config.defaultMinutesFor(config.DEFAULT_TTL) +
       ' minutes (1h prompt-cache TTL minus 1 minute). Run /idle-compact setup to change it.',
     hookSpecificOutput: {

@@ -6,7 +6,7 @@
     "name": "Jim Cline",
     "email": "jamescline@outlook.com"
   },
-  "homepage": "https://github.com/JimCline/claude-idle-compactor",
-  "repository": "https://github.com/JimCline/claude-idle-compactor",
+  "homepage": "https://github.com/JimCline/claude-compaction-tools",
+  "repository": "https://github.com/JimCline/claude-compaction-tools",
   "license": "MIT"
 }

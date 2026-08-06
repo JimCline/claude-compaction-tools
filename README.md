@@ -1,4 +1,4 @@
-# claude-idle-compactor
+# claude-compaction-tools
 
 Runs `/compact` automatically when a Claude Code session goes idle, timed to
 land just before the Anthropic prompt cache expires.
@@ -55,7 +55,7 @@ injection](#blind-injection).
 ## Install
 
 ```
-/plugin marketplace add JimCline/claude-idle-compactor
+/plugin marketplace add JimCline/claude-compaction-tools
 /plugin install idle-compactor@jimcline-plugins
 ```
 
