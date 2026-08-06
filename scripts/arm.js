@@ -12,6 +12,7 @@ const config = require('./lib/config');
 const state = require('./lib/state');
 const transcript = require('./lib/transcript');
 const inject = require('./lib/inject');
+const prompt = require('./lib/prompt');
 const { readInput } = require('./lib/hookio');
 
 async function main() {
@@ -40,11 +41,16 @@ async function main() {
 
   const armedAt = Date.now();
   const armId = state.newArmId();
+  const cwd = input.cwd || process.cwd();
+  // Resolved now rather than at fire time so the text that will be typed is
+  // visible in the state file, and so a prompt file edited mid-idle cannot
+  // change what this armed timer sends.
+  const text = prompt.compactCommand(cwd, cfg);
   const record = {
     version: 1,
     armId,
     sessionId,
-    cwd: input.cwd || process.cwd(),
+    cwd,
     transcriptPath: transcriptPath || null,
     transcriptMtime: transcriptPath ? transcript.mtimeMs(transcriptPath) : null,
     contextTokens: tokens,
@@ -53,7 +59,7 @@ async function main() {
     idleMinutes: cfg.idleMinutes,
     cacheTtl: cfg.cacheTtl,
     allowBlindInjection: cfg.allowBlindInjection,
-    text: '/compact',
+    text,
     nodePath: process.execPath,
     env: inject.captureEnv(),
     tty: inject.controllingTty(process.ppid),

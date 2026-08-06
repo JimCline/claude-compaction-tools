@@ -28,6 +28,9 @@ Map the arguments to exactly one Bash command:
 | `<number>` or `minutes <number>` | `CLI set minutes <number>` |
 | `min-tokens <number>` | `CLI set min-tokens <number>` |
 | `blind on` / `blind off` | `CLI blind on` / `CLI blind off` |
+| `prompt` | Run the prompt conversation described below |
+| `prompt show` | `CLI prompt show` |
+| `prompt clear` | `CLI prompt clear` |
 | `test` | `CLI test` |
 | `test send` | `CLI test --send` |
 | `doctor` | `DOCTOR` |
@@ -40,6 +43,45 @@ context.
 
 If the arguments match nothing in the table, run `CLI status` and show the user
 the table of accepted forms.
+
+## The `prompt` conversation
+
+Only for `prompt` with no further arguments. A compaction prompt is extra text
+appended to the injected command, so the plugin types `/compact <their text>`
+instead of a bare `/compact`, and Claude Code uses it as focus instructions for
+the summary.
+
+1. Ask both of these in a **single AskUserQuestion call**.
+
+   Question 1 — header **Prompt text**, what the summary should focus on:
+   - **Preserve exact identifiers** — "Keep file paths, function names, and
+     command invocations verbatim rather than describing them."
+   - **Unresolved work first** — "Lead with unfinished work, open bugs, and the
+     next concrete step. Keep decisions and their rationale; drop tool output."
+   - **Decisions and rationale** — "Preserve every decision made and why,
+     including the options considered and rejected."
+   - **Other** — whatever they type becomes the prompt verbatim.
+
+   Question 2 — header **Save to**, where the prompt file lives:
+   - **This repo** — `.claude/compaction-prompt.md` in the repo root. Applies to
+     this repo only, and can be committed so a team shares it.
+   - **User level** — `~/.claude/compaction-prompt.md`. Applies to every repo
+     that has not set its own.
+   - **Other** — any path they name.
+
+2. Write their chosen text to the chosen path with the Write tool, creating
+   parent directories if needed. Keep it to a few sentences of plain prose — no
+   headings or lists.
+3. Register it: `CLI prompt use <absolute path>`, or
+   `CLI prompt use <absolute path> --user` for the user-level one.
+4. Show the `would send:` line from that output so the user sees the exact text
+   that will be typed.
+5. Close by telling them plainly: **this applies to the idle compactions the
+   plugin fires. A `/compact` they type themselves is unaffected.**
+
+Newlines are flattened to spaces before sending, because the text goes out as
+one terminal line and a newline would submit the command early. Anything past
+800 characters is dropped, and `CLI prompt use` says so when that happens.
 
 ## The `setup` conversation
 

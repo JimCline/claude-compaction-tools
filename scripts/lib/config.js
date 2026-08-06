@@ -23,6 +23,8 @@ const DEFAULTS = {
   minTokens: 20000,
   allowBlindInjection: false,
   setupCompleted: false,
+  promptPath: null, // user-level compaction prompt file
+  prompts: {}, // repo key => compaction prompt file, overrides promptPath
 };
 
 function ensureRoot() {
@@ -52,6 +54,16 @@ function write(patch) {
   return next;
 }
 
+// write() merges one level deep, so a patch carrying `prompts` would replace
+// the whole map. Every per-repo change goes through here instead.
+function setPromptPath(repoKey, file) {
+  const current = Object.assign({}, DEFAULTS, read());
+  const prompts = Object.assign({}, current.prompts);
+  if (file) prompts[repoKey] = file;
+  else delete prompts[repoKey];
+  return write({ prompts });
+}
+
 function truthy(v) {
   if (v == null) return false;
   return /^(1|true|yes|on)$/i.test(String(v).trim());
@@ -67,6 +79,9 @@ function falsy(v) {
 function resolve(env) {
   env = env || process.env;
   const cfg = Object.assign({}, DEFAULTS, read());
+  // Object.assign is shallow, so an untouched config would hand every caller
+  // the same DEFAULTS.prompts object to mutate.
+  cfg.prompts = Object.assign({}, cfg.prompts);
 
   if (truthy(env.CLAUDE_IDLE_COMPACT_DISABLE)) cfg.enabled = false;
   if (falsy(env.CLAUDE_IDLE_COMPACT_DISABLE)) cfg.enabled = true;
@@ -106,5 +121,6 @@ module.exports = {
   defaultMinutesFor,
   read,
   write,
+  setPromptPath,
   resolve,
 };

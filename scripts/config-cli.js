@@ -5,9 +5,13 @@
 
 const path = require('path');
 
+const fs = require('fs');
+
 const config = require('./lib/config');
 const state = require('./lib/state');
 const inject = require('./lib/inject');
+const prompt = require('./lib/prompt');
+const repo = require('./lib/repo');
 
 const argv = process.argv.slice(2);
 const asJson = argv.includes('--json');
@@ -36,8 +40,65 @@ function describe(cfg) {
     'cache TTL mode: ' + cfg.cacheTtl,
     'minimum context: ' + cfg.minTokens + ' tokens',
     'blind injection: ' + (cfg.allowBlindInjection ? 'allowed' : 'blocked'),
+    prompt.describe(process.cwd(), cfg),
     'config file:    ' + config.CONFIG_PATH,
   ].join('\n');
+}
+
+function promptCommand() {
+  const sub = (args[1] || 'show').toLowerCase();
+  const userLevel = args.includes('--user');
+  const cwd = process.cwd();
+
+  if (sub === 'show') {
+    const cfg = config.resolve();
+    const resolved = prompt.resolveFor(cwd, cfg);
+    const lines = [
+      prompt.describe(cwd, cfg),
+      'repo key:       ' + repo.key(cwd),
+      'user-level:     ' + (cfg.promptPath || 'none'),
+    ];
+    if (resolved.text) {
+      lines.push('');
+      lines.push('would send: /compact ' + resolved.text);
+    }
+    return out(lines.join('\n'), { ok: true, prompt: resolved, repoKey: repo.key(cwd) });
+  }
+
+  if (sub === 'use') {
+    const given = args[2];
+    if (!given) return fail('prompt use needs a file path');
+    const file = path.resolve(given);
+    if (!fs.existsSync(file)) return fail('no such file: ' + file);
+
+    const text = prompt.flatten(fs.readFileSync(file, 'utf8'));
+    if (!text) return fail('that file is empty, so there is no prompt to send');
+
+    if (userLevel) config.write({ promptPath: file });
+    else config.setPromptPath(repo.key(cwd), file);
+
+    const cfg = config.resolve();
+    const lines = [prompt.describe(cwd, cfg)];
+    if (text.length > prompt.MAX_CHARS) {
+      lines.push(
+        'note: ' +
+          text.length +
+          ' chars flattened; only the first ' +
+          prompt.MAX_CHARS +
+          ' will be sent'
+      );
+    }
+    lines.push('would send: /compact ' + text.slice(0, prompt.MAX_CHARS));
+    return out(lines.join('\n'), { ok: true, path: file, scope: userLevel ? 'user' : 'repo' });
+  }
+
+  if (sub === 'clear') {
+    if (userLevel) config.write({ promptPath: null });
+    else config.setPromptPath(repo.key(cwd), null);
+    return out(prompt.describe(cwd, config.resolve()), { ok: true });
+  }
+
+  return fail('unknown prompt command: ' + sub + ' (expected show, use, or clear)');
 }
 
 function status() {
@@ -199,6 +260,9 @@ function main() {
     case 'reset':
       config.write(Object.assign({}, config.DEFAULTS));
       return out(describe(config.resolve()), { ok: true, config: config.resolve() });
+
+    case 'prompt':
+      return promptCommand();
 
     case 'test':
       return testInjection();

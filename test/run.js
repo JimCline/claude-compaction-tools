@@ -289,6 +289,9 @@ function cli(argv) {
   return spawnSync(process.execPath, [path.join(PLUGIN, 'scripts/config-cli.js')].concat(argv), {
     encoding: 'utf8',
     env: env(),
+    // Pinned so per-repo settings key off the plugin repo no matter where the
+    // suite was invoked from.
+    cwd: PLUGIN,
     timeout: 20000,
   });
 }
@@ -320,6 +323,79 @@ function cli(argv) {
   check('paths reports an absolute node binary', /node: \//.test(cli(['paths']).stdout), cli(['paths']).stdout);
   check('setup-done records the flag', /setup recorded/.test(cli(['setup-done']).stdout));
   check('reset restores defaults', /idle threshold: 59 min/.test(cli(['reset']).stdout));
+}
+
+// ---------------------------------------------------------------------------
+console.log('\ncompaction prompt');
+{
+  const promptFile = path.join(SANDBOX, 'prompt.md');
+  fs.writeFileSync(promptFile, 'Focus on the API changes\nand keep the file list.\n');
+
+  check('none by default', /compaction prompt: none/.test(cli(['prompt', 'show']).stdout));
+  check('rejects a missing file', cli(['prompt', 'use', path.join(SANDBOX, 'nope.md')]).status === 1);
+
+  const emptyFile = path.join(SANDBOX, 'empty.md');
+  fs.writeFileSync(emptyFile, '   \n\n');
+  check('rejects an empty file', cli(['prompt', 'use', emptyFile]).status === 1);
+
+  const used = cli(['prompt', 'use', promptFile]).stdout;
+  check('records a repo-scoped prompt', /compaction prompt: repo/.test(used), used);
+  check(
+    'flattens newlines into a single line',
+    /would send: \/compact Focus on the API changes and keep the file list\./.test(used),
+    used
+  );
+
+  writeTranscript(50000);
+  runScript('arm.js', { session_id: 'p1', transcript_path: TRANSCRIPT, cwd: PLUGIN });
+  const record = sessionState('p1');
+  check(
+    'arm bakes the prompt into the text it will type',
+    !!record && /^\/compact Focus on the API changes and keep the file list\.$/.test(record.text),
+    record && record.text
+  );
+  if (record && record.timerPid) {
+    try {
+      process.kill(record.timerPid);
+    } catch (_) {
+      /* already gone */
+    }
+  }
+
+  check('clear removes it', /compaction prompt: none/.test(cli(['prompt', 'clear']).stdout));
+
+  const userScoped = cli(['prompt', 'use', promptFile, '--user']).stdout;
+  check('--user records a user-level prompt', /compaction prompt: user/.test(userScoped), userScoped);
+  cli(['prompt', 'clear', '--user']);
+  check('clear --user removes it', /compaction prompt: none/.test(cli(['prompt', 'show']).stdout));
+
+  const longFile = path.join(SANDBOX, 'long.md');
+  fs.writeFileSync(longFile, 'x'.repeat(1200));
+  const longOut = cli(['prompt', 'use', longFile]).stdout;
+  check('warns when the prompt exceeds the cap', /only the first 800/.test(longOut), longOut);
+
+  const missingOut = (() => {
+    fs.rmSync(longFile);
+    return cli(['status']).stdout;
+  })();
+  check('status flags a prompt file that has gone missing', /FILE MISSING/.test(missingOut), missingOut);
+  cli(['prompt', 'clear']);
+
+  check(
+    'a session with no prompt still sends a bare /compact',
+    (() => {
+      runScript('arm.js', { session_id: 'p2', transcript_path: TRANSCRIPT, cwd: PLUGIN });
+      const bare = sessionState('p2');
+      if (bare && bare.timerPid) {
+        try {
+          process.kill(bare.timerPid);
+        } catch (_) {
+          /* already gone */
+        }
+      }
+      return !!bare && bare.text === '/compact';
+    })()
+  );
 }
 
 // ---------------------------------------------------------------------------
