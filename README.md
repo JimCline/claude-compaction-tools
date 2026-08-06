@@ -64,8 +64,8 @@ injection](#blind-injection).
 
 ```
 /plugin marketplace add JimCline/claude-compaction-tools
-/plugin install idle-compactor@jimcline-plugins
-/plugin install compaction-capture@jimcline-plugins
+/plugin install idle-compactor@jcline-claude-compaction-tools
+/plugin install compaction-capture@jcline-claude-compaction-tools
 ```
 
 The two are independent — install either on its own.
@@ -277,8 +277,8 @@ and `claude plugin validate .claude-plugin/marketplace.json`.
 ## Uninstall
 
 ```
-/plugin uninstall idle-compactor@jimcline-plugins
-/plugin uninstall compaction-capture@jimcline-plugins
+/plugin uninstall idle-compactor@jcline-claude-compaction-tools
+/plugin uninstall compaction-capture@jcline-claude-compaction-tools
 rm -rf ~/.claude/idle-compactor ~/.claude/compaction-capture
 ```
 
