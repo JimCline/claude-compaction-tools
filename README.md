@@ -86,6 +86,9 @@ setup` any time to change your mind.
 /idle-compact min-tokens 40000   only compact above this context size
 /idle-compact min-tokens 0       no floor; compact whenever idle
 /idle-compact blind on|off    allow or block focus-based injection
+/idle-compact prompt          set the focus instructions sent with /compact
+/idle-compact prompt show     what would be sent, and from which file
+/idle-compact prompt clear    stop sending one
 /idle-compact test            show which injection method would be used
 /idle-compact test send       actually type a harmless command, end to end
 /idle-compact doctor          full diagnostics
