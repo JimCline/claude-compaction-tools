@@ -30,11 +30,14 @@ test('PostCompact adds the recovery check', () => {
   assert.ok(out.includes('A compaction just completed'), 'post-compact check missing');
 });
 
-test('resume and clear are skipped', () => {
-  for (const source of ['resume', 'clear']) {
-    const out = runHook({ hook_event_name: 'SessionStart', source, cwd: process.cwd() });
-    assert.strictEqual(out, '', 'expected no output for source=' + source);
-  }
+test('resume is skipped — the restored transcript already carries the directive', () => {
+  const out = runHook({ hook_event_name: 'SessionStart', source: 'resume', cwd: process.cwd() });
+  assert.strictEqual(out, '', 'expected no output for source=resume');
+});
+
+test('clear is not skipped — an emptied context is when the policy is needed', () => {
+  const out = runHook({ hook_event_name: 'SessionStart', source: 'clear', cwd: process.cwd() });
+  assert.ok(out.includes('Standing directive'), 'policy missing after clear');
 });
 
 test('output is plain text, not a JSON envelope', () => {

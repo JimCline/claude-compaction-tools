@@ -9,10 +9,11 @@ const config = require('./lib/config');
 const directive = require('./lib/directive');
 const { readInput, emit } = require('./lib/hookio');
 
-// SessionStart fires on resume and clear as well as startup. Those already
-// carry the directive from the run that armed it, and clear is the user
-// deliberately emptying the context — re-stating on either is noise.
-const SKIP_SOURCES = new Set(['resume', 'clear']);
+// SessionStart fires on resume as well as startup. A resumed session restores
+// the transcript that already carries the directive, so re-stating duplicates
+// it. Clear is not skipped: it empties the working context, which is exactly
+// when a standing policy has to be restated.
+const SKIP_SOURCES = new Set(['resume']);
 
 async function main() {
   const payload = await readInput();
