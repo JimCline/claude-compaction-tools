@@ -1,12 +1,15 @@
 # claude-compaction-tools
 
-Two Claude Code plugins for managing context compaction.
+Three Claude Code plugins for managing context compaction.
 
 - **idle-compactor** — runs `/compact` automatically when a session goes idle,
   timed to land just before the Anthropic prompt cache expires, optionally with
   your own focus instructions attached.
 - **compaction-capture** — writes each compaction summary to a file after the
   fact, so the context a session dropped is still on disk.
+- **compaction-guard** — re-states your standing directives after every
+  compaction, so rules the summary dropped are back in context before the next
+  turn.
 
 Everything up to [compaction-capture](#compaction-capture) describes
 `idle-compactor`.
@@ -66,9 +69,10 @@ injection](#blind-injection).
 /plugin marketplace add JimCline/claude-compaction-tools
 /plugin install idle-compactor@jcline-claude-compaction-tools
 /plugin install compaction-capture@jcline-claude-compaction-tools
+/plugin install compaction-guard@jcline-claude-compaction-tools
 ```
 
-The two are independent — install either on its own.
+The three are independent — install any one on its own.
 
 On the first session after installing, the plugin asks you two things: the idle
 threshold, and the minimum context size worth compacting. Run `/idle-compact
@@ -268,19 +272,82 @@ section parsing — so a later pass can make of it whatever it likes.
 Re-firing the hook on a compaction already captured writes nothing: each
 session records the summary `uuid` it last wrote.
 
+# compaction-guard
+
+compaction-capture saves the summary. This plugin addresses the other half: what
+the summary *left out*.
+
+The damaging case is not losing information in general — it is losing a rule.
+A dropped constraint is indistinguishable from a constraint that never existed;
+there is no gap in the context where it used to be, so the next turn proceeds
+confidently past it. Negative constraints are the worst of these, because their
+absence silently re-enables the exact path they forbade.
+
+```
+/compaction-guard            whether the guard is on here, and in which mode
+/compaction-guard show       the directive exactly as it would be injected
+/compaction-guard on|off     enable or disable for this repo
+/compaction-guard mode default|append|replace
+/compaction-guard set <file> use a file's contents as the directive
+/compaction-guard reset      drop this repo's overrides
+```
+
+The directive is stated on `SessionStart` and re-stated on `PostCompact`. Both
+events take context as **plain stdout** — the structured `hookSpecificOutput`
+envelope is not read on either, and writing JSON there injects nothing.
+
+## What it can and cannot protect
+
+- **Standing directives** — rules, constraints, instructions. The hook knows
+  this text, so it restates it verbatim after every compaction. This does not
+  depend on the summarizer cooperating at all.
+- **In-flight task state** — which task is underway, what was just decided. A
+  hook cannot know this, so it cannot restate it. Steering that needs a
+  `## Compact Instructions` section in your CLAUDE.md, which is a separate and
+  weaker mechanism.
+
+## Why re-stating still helps after the fact
+
+The `PostCompact` text lands *after* the summary, so it cannot steer the
+compaction that just ran. It has two other jobs. It survives into the next one —
+it cannot be compacted away by the compaction that triggered it. And it asks
+whether the directives governing the current work can still be stated, turning a
+loss that already happened into something sayable rather than silent.
+
+`SessionStart` skips `resume` (the restored transcript already carries the
+directive) but not `clear` — an emptied context is exactly when a standing policy
+has to be present.
+
+## Configuration
+
+Settings live in `~/.claude/compaction-guard/config.json`, with per-repo
+overrides keyed on the enclosing git worktree, so nothing is written into a
+working tree to record a preference.
+
+The shipped directive names itself as operator-configured policy. That is
+deliberate: a model reads hook stdout as untrusted third-party content and will
+discount an anonymous block that issues orders.
+
+See [docs/compaction-guard-design.md](docs/compaction-guard-design.md) for the
+measurements behind all of this, and the approaches that were rejected.
+
 # Development
 
 ```
 node test/run.js                      # idle-compactor
 node compaction-capture/test/run.js   # compaction-capture
+node compaction-guard/test/run.js     # compaction-guard
 ```
 
-Both suites run against a throwaway `HOME`, so they never touch your real
+The suites run against a throwaway `HOME`, so they never touch your real
 `~/.claude`. The first covers token accounting, threshold derivation, the
 arm/disarm/re-arm lifecycle, every timer abort path, the compaction prompt, the
 CLI, and the first-run notice. The second covers summary extraction, the
 per-repo location store, the front matter, duplicate suppression, and the
-malformed-input paths.
+malformed-input paths. The third covers which events inject and which are
+skipped, the `PostCompact`-only recovery paragraph, malformed payloads — and
+pins the requirement that output is plain text rather than a JSON envelope,
+since that mistake fails silently.
 
 Manifests can be checked with `claude plugin validate .claude-plugin/plugin.json`
 and `claude plugin validate .claude-plugin/marketplace.json`.
@@ -290,7 +357,8 @@ and `claude plugin validate .claude-plugin/marketplace.json`.
 ```
 /plugin uninstall idle-compactor@jcline-claude-compaction-tools
 /plugin uninstall compaction-capture@jcline-claude-compaction-tools
-rm -rf ~/.claude/idle-compactor ~/.claude/compaction-capture
+/plugin uninstall compaction-guard@jcline-claude-compaction-tools
+rm -rf ~/.claude/idle-compactor ~/.claude/compaction-capture ~/.claude/compaction-guard
 ```
 
 Captures already written are left alone — delete
