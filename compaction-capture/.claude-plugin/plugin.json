@@ -1,6 +1,6 @@
 {
   "name": "compaction-capture",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Saves each compaction summary to a file after compaction completes, so the context a session dropped is still on disk.",
   "author": {
     "name": "Jim Cline",

@@ -1,12 +1,12 @@
 'use strict';
 
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 
 const config = require('./config');
 const repo = require('./repo');
 const summary = require('./summary');
+const transcripts = require('./transcripts');
 
 // PostCompact fires when compaction completes, but the summary entry it
 // produced is written by a separate code path — so poll briefly rather than
@@ -18,14 +18,17 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Claude Code files transcripts under a slug of the working directory. Only a
-// fallback: the hook payload normally carries transcript_path outright.
+// Both branches are fallbacks — the hook payload normally carries
+// transcript_path outright. Claude Code files transcripts under a slug of the
+// working directory, which holds only for a session that started here, so a
+// derived path that does not exist falls through to finding the session's
+// file by id.
 function transcriptPathFor(input) {
   if (input && input.transcript_path) return input.transcript_path;
   if (!input || !input.session_id) return null;
-  const cwd = input.cwd || process.cwd();
-  const slug = String(cwd).replace(/\//g, '-');
-  return path.join(os.homedir(), '.claude', 'projects', slug, input.session_id + '.jsonl');
+  const derived = transcripts.derivedPath(input.cwd || process.cwd(), input.session_id);
+  if (fs.existsSync(derived)) return derived;
+  return transcripts.bySessionId(input.session_id);
 }
 
 function stamp(date) {
@@ -72,6 +75,7 @@ function render(found, input, cwd) {
       dropped_tokens: meta.cumulativeDroppedTokens,
       claude_code_version: found.version,
       summary_uuid: found.uuid,
+      source: found.source || 'transcript',
       chars: found.chars,
     }) +
     '\n\n' +
@@ -90,6 +94,23 @@ function uniquePath(dir, base) {
   return candidate;
 }
 
+// Everything the transcript entry cannot supply when the entry is all we have
+// is the payload's, and vice versa — this is the payload-only shape.
+function fromPayload(input, text) {
+  return {
+    uuid: (input && input.prompt_id) || null,
+    parentUuid: null,
+    timestamp: new Date().toISOString(),
+    cwd: (input && input.cwd) || null,
+    gitBranch: null,
+    version: null,
+    sessionId: (input && input.session_id) || null,
+    metadata: null,
+    chars: text.length,
+    text,
+  };
+}
+
 // Returns a result object rather than throwing: this runs as a hook, where the
 // only acceptable failure mode is doing nothing quietly.
 async function run(input, options) {
@@ -104,28 +125,54 @@ async function run(input, options) {
   const location = opts.location || (settings && settings.location);
   if (!location) return { ok: false, skipped: 'no-location' };
 
+  // PostCompact hands the summary over in the payload, and that copy is the
+  // fuller one: the transcript entry keeps only the <summary> section, while
+  // this carries the model's <analysis> reasoning with it. The transcript is
+  // still read, for the provenance and the uuid the payload has no field for.
+  const payloadText =
+    input && typeof input.compact_summary === 'string' && input.compact_summary.trim()
+      ? input.compact_summary
+      : null;
+
   const transcriptPath = opts.transcriptPath || transcriptPathFor(input);
-  if (!transcriptPath) return { ok: false, skipped: 'no-transcript-path' };
+  if (!transcriptPath && !payloadText) return { ok: false, skipped: 'no-transcript-path' };
 
   const sessionId = (input && input.session_id) || 'unknown';
   const state = config.readState(sessionId);
 
   const deadline = Date.now() + (opts.waitMs === undefined ? WAIT_MS : opts.waitMs);
   let found = null;
-  for (;;) {
+  let landed = false;
+  while (transcriptPath) {
     found = summary.lastSummary(transcriptPath);
     // A uuid match means this is the compaction we already wrote, not a new
-    // one — keeps a re-fired hook from producing duplicate files.
-    const isNew = found && (!found.uuid || found.uuid !== state.lastUuid);
-    if (found && isNew) break;
-    if (Date.now() >= deadline) {
-      return {
-        ok: false,
-        skipped: found ? 'already-captured' : 'no-summary-found',
-        transcriptPath,
-      };
+    // one — keeps a re-fired hook from producing duplicate files. A forced
+    // capture is someone asking for the file on purpose, so it writes anyway.
+    const isNew = found && (opts.force || !found.uuid || found.uuid !== state.lastUuid);
+    if (found && isNew) {
+      landed = true;
+      break;
     }
+    // No point waiting out the poll for an entry that is already captured.
+    if (found || Date.now() >= deadline) break;
     await wait(POLL_MS);
+  }
+
+  if (!landed) {
+    // An entry that exists but is already captured stays captured; only a
+    // missing one falls through to the payload.
+    if (found && !opts.force) return { ok: false, skipped: 'already-captured', transcriptPath };
+    if (!payloadText) return { ok: false, skipped: 'no-summary-found', transcriptPath };
+    found = fromPayload(input, payloadText);
+    if (found.uuid && found.uuid === state.lastUuid && !opts.force) {
+      return { ok: false, skipped: 'already-captured', transcriptPath };
+    }
+  }
+
+  if (payloadText) {
+    found.source = 'payload';
+    found.text = payloadText;
+    found.chars = payloadText.length;
   }
 
   let file;
@@ -146,7 +193,7 @@ async function run(input, options) {
     transcriptPath,
   });
 
-  return { ok: true, file, chars: found.chars, location, transcriptPath };
+  return { ok: true, file, chars: found.chars, location, transcriptPath, source: found.source || 'transcript' };
 }
 
 module.exports = { run, transcriptPathFor, render, stamp, WAIT_MS };

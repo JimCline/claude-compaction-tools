@@ -9,6 +9,7 @@ const path = require('path');
 const capture = require('./lib/capture');
 const config = require('./lib/config');
 const repo = require('./lib/repo');
+const transcripts = require('./lib/transcripts');
 
 const argv = process.argv.slice(2);
 const asJson = argv.includes('--json');
@@ -127,15 +128,32 @@ function disable() {
 // Writes a capture right now from the current transcript, bypassing the
 // enabled check. The only way to prove the whole path works without waiting
 // for a real compaction.
+//
+// Unlike the hook, this gets no payload: no transcript path and no session id
+// to derive one from. So it goes looking for the transcript instead.
 async function captureNow() {
   const cwd = process.cwd();
   const settings = config.forRepo(cwd);
   const location = flag('location') || (settings && settings.location);
   if (!location) return fail('no location configured; run enable first, or pass --location <dir>');
 
+  let sessionId = flag('session');
+  let transcriptPath = flag('transcript') ? path.resolve(flag('transcript')) : null;
+  if (!transcriptPath && sessionId) transcriptPath = transcripts.bySessionId(sessionId);
+  if (!transcriptPath) {
+    const found = transcripts.newestSummaryFor(cwd);
+    if (found) {
+      transcriptPath = found.file;
+      sessionId = sessionId || found.sessionId;
+    }
+  }
+  if (!transcriptPath) {
+    return fail('no transcript for this repo holds a compaction summary yet; pass --transcript <file> to point at one');
+  }
+
   const result = await capture.run(
-    { session_id: flag('session') || 'manual', cwd, transcript_path: flag('transcript') || null },
-    { force: true, location: path.resolve(location), waitMs: 0, transcriptPath: flag('transcript') }
+    { session_id: sessionId || 'manual', cwd, transcript_path: transcriptPath },
+    { force: true, location: path.resolve(location), waitMs: 0, transcriptPath }
   );
 
   if (!result.ok) {

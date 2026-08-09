@@ -208,8 +208,15 @@ This plugin copies that summary out to a file you can actually find.
 ```
 
 It runs on the `PostCompact` hook, which fires after a compaction completes for
-both manual and automatic triggers. The hook reads the transcript, takes the
-last compaction summary in it, and writes one markdown file per compaction.
+both manual and automatic triggers, and writes one markdown file per
+compaction.
+
+The hook is handed the summary in its payload, and the transcript holds a
+matching entry. Both are used, because they are not the same text: the payload
+copy keeps the model's `<analysis>` reasoning, which the entry drops, while the
+entry carries the provenance — branch, Claude Code version, token counts — that
+the payload has no field for. The `source:` line in the front matter says which
+copy the body came from. Either alone is enough to write a capture.
 
 ## Where captures go
 
@@ -247,9 +254,13 @@ trigger: manual
 pre_tokens: 242889
 post_tokens: 21842
 claude_code_version: 2.1.217
+source: payload
 chars: 19292
 ---
 ```
+
+Fields Claude Code did not supply are left out rather than written empty — the
+token counts come from a `compactMetadata` block that not every version emits.
 
 The summary body is left exactly as Claude Code wrote it — no reformatting, no
 section parsing — so a later pass can make of it whatever it likes.

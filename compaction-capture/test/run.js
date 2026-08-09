@@ -178,6 +178,130 @@ console.log('\nPostCompact hook');
 }
 
 // ---------------------------------------------------------------------------
+// The real PostCompact payload carries compact_summary, and that copy keeps
+// the model's <analysis> section that the transcript entry drops.
+console.log('\npayload summary');
+{
+  const dir = path.join(REPO, '.claude', 'compaction-captures');
+  cli(['enable', '--mode', 'repo']);
+
+  writeTranscript([{ uuid: 'p1', timestamp: '2026-08-07T12:00:00.000Z', text: 'the trimmed entry' }]);
+  const r = hook({
+    session_id: 'sess-payload',
+    transcript_path: TRANSCRIPT,
+    cwd: REPO,
+    prompt_id: 'prompt-1',
+    hook_event_name: 'PostCompact',
+    trigger: 'auto',
+    compact_summary: '<analysis>the reasoning</analysis>\n<summary>the fuller text</summary>',
+  });
+  check('hook exits 0 with a payload summary', r.status === 0, r.stderr);
+
+  const file = fs.readdirSync(dir).filter((f) => /^2026-08-07/.test(f))[0];
+  const body = file ? fs.readFileSync(path.join(dir, file), 'utf8') : '';
+  check('prefers the payload text over the transcript entry', /the reasoning/.test(body), body.slice(0, 400));
+  check('records which copy it wrote', /\nsource: payload\n/.test(body), body.slice(0, 400));
+  check('still takes provenance from the transcript entry', /\nsummary_uuid: p1\n/.test(body) && /\nbranch: main\n/.test(body), body.slice(0, 400));
+
+  // No transcript at all: the payload alone is enough to write a capture.
+  const manualBefore = fs.readdirSync(dir).filter((f) => f.endsWith('-manual.md')).length;
+  const orphan = hook({
+    session_id: 'sess-orphan',
+    transcript_path: path.join(SANDBOX, 'gone.jsonl'),
+    cwd: REPO,
+    prompt_id: 'prompt-2',
+    trigger: 'manual',
+    compact_summary: 'summary with no transcript behind it',
+  });
+  check('captures from the payload when the entry is missing', orphan.status === 0, orphan.stderr);
+  const solo = fs.readdirSync(dir).filter((f) => f.endsWith('-manual.md')).sort().pop();
+  const soloBody = solo ? fs.readFileSync(path.join(dir, solo), 'utf8') : '';
+  check('payload-only capture holds the text', /no transcript behind it/.test(soloBody), solo);
+  check('payload-only capture falls back to prompt_id for the uuid', /\nsummary_uuid: prompt-2\n/.test(soloBody), soloBody.slice(0, 400));
+
+  const repeat = hook({
+    session_id: 'sess-orphan',
+    transcript_path: path.join(SANDBOX, 'gone.jsonl'),
+    cwd: REPO,
+    prompt_id: 'prompt-2',
+    trigger: 'manual',
+    compact_summary: 'summary with no transcript behind it',
+  });
+  const soloCount = fs.readdirSync(dir).filter((f) => f.endsWith('-manual.md')).length;
+  check(
+    'a re-fired payload-only hook writes nothing new',
+    repeat.status === 0 && soloCount === manualBefore + 1,
+    soloCount + ' vs ' + (manualBefore + 1)
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Nothing here passes transcript_path. That is the point: the CLI never has
+// one, and the hook payload is not guaranteed to carry it.
+console.log('\ntranscript discovery');
+{
+  const projects = path.join(SANDBOX, '.claude', 'projects');
+  const dir = path.join(REPO, '.claude', 'compaction-captures');
+
+  // Claude Code files a transcript under a slug of the directory the session
+  // started in. STALE is the slug of a directory this repo has since been
+  // renamed away from — the summary entries still record the current path.
+  const live = path.join(projects, REPO.replace(/\//g, '-'));
+  const stale = path.join(projects, path.join(SANDBOX, 'old-name').replace(/\//g, '-'));
+  fs.mkdirSync(live, { recursive: true });
+  fs.mkdirSync(stale, { recursive: true });
+
+  writeTranscript([{ uuid: 'd1', timestamp: '2026-08-04T08:00:00.000Z', text: 'discovered summary' }]);
+  fs.copyFileSync(TRANSCRIPT, path.join(live, 'sess-live.jsonl'));
+
+  cli(['enable', '--mode', 'repo']);
+  const before = fs.readdirSync(dir).filter((f) => f.endsWith('.md')).length;
+
+  const r = cli(['capture']);
+  check('capture with no arguments finds the transcript', r.status === 0, r.stdout + r.stderr);
+  check('capture writes a file', fs.readdirSync(dir).filter((f) => f.endsWith('.md')).length === before + 1);
+  check('capture reports the session id off the summary, not "manual"', /session: sess-1\n/.test(
+    fs.readFileSync(path.join(dir, fs.readdirSync(dir).filter((f) => /^2026-08-04/.test(f))[0]), 'utf8')
+  ));
+
+  // Same repo, but filed under the directory name it used to have.
+  fs.rmSync(path.join(live, 'sess-live.jsonl'));
+  writeTranscript([{ uuid: 'd2', timestamp: '2026-08-05T08:00:00.000Z', text: 'summary from before the rename' }]);
+  fs.copyFileSync(TRANSCRIPT, path.join(stale, 'sess-stale.jsonl'));
+
+  const renamed = cli(['capture']);
+  check('finds a transcript stranded under an old directory slug', renamed.status === 0, renamed.stdout + renamed.stderr);
+  check('captured the stranded summary', fs.readdirSync(dir).some((f) => /^2026-08-05/.test(f)));
+
+  // A transcript belonging to some other repo must not be mistaken for ours.
+  const foreign = path.join(projects, '-somewhere-else');
+  fs.mkdirSync(foreign, { recursive: true });
+  fs.writeFileSync(
+    path.join(foreign, 'sess-other.jsonl'),
+    JSON.stringify({
+      type: 'user',
+      isCompactSummary: true,
+      uuid: 'x1',
+      timestamp: '2026-08-06T08:00:00.000Z',
+      cwd: path.join(SANDBOX, 'other-repo'),
+      sessionId: 'sess-other',
+      message: { role: 'user', content: [{ type: 'text', text: 'not ours' }] },
+    }) + '\n'
+  );
+  fs.rmSync(path.join(stale, 'sess-stale.jsonl'));
+  const none = cli(['capture']);
+  check('ignores another repo\'s transcript', none.status === 1, none.stdout);
+  check('says so plainly', /no transcript for this repo/.test(none.stdout), none.stdout);
+
+  // The hook is normally handed transcript_path, but must cope without one.
+  fs.copyFileSync(TRANSCRIPT, path.join(stale, 'sess-stale.jsonl'));
+  const had = fs.readdirSync(dir).filter((f) => f.endsWith('.md')).length;
+  const h = hook({ session_id: 'sess-stale', cwd: REPO, hook_event_name: 'PostCompact', trigger: 'auto' });
+  check('hook resolves a payload with no transcript_path', h.status === 0, h.stderr);
+  check('hook captured it', fs.readdirSync(dir).filter((f) => f.endsWith('.md')).length === had + 1);
+}
+
+// ---------------------------------------------------------------------------
 console.log('\nsafety');
 {
   const dir = path.join(REPO, '.claude', 'compaction-captures');
