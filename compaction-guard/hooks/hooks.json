@@ -1,0 +1,27 @@
+{
+  "description": "States the standing directive at session start and re-states it after each compaction. Both events deliver context as plain stdout; the structured hookSpecificOutput envelope is not read on either.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/inject.js\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/inject.js\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "compaction-guard",
+  "version": "0.1.0",
+  "description": "Re-states your standing directives after every compaction, so rules the summary dropped are back in context before the next turn.",
+  "author": {
+    "name": "Jim Cline",
+    "email": "jamescline@outlook.com"
+  },
+  "homepage": "https://github.com/JimCline/claude-compaction-tools",
+  "repository": "https://github.com/JimCline/claude-compaction-tools",
+  "license": "MIT"
+}

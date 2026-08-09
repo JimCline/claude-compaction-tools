@@ -3,3 +3,7 @@ node_modules/
 *.tmp
 .DS_Store
 Thumbs.db
+
+# Local session state. compaction-captures/ holds saved compaction summaries,
+# which are conversation content and must not reach the public remote.
+.claude/

@@ -15,8 +15,14 @@
     {
       "name": "compaction-capture",
       "source": "./compaction-capture",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "Saves each compaction summary to a file after compaction completes, so the context a session dropped is still on disk."
+    },
+    {
+      "name": "compaction-guard",
+      "source": "./compaction-guard",
+      "version": "0.1.0",
+      "description": "Re-states your standing directives after every compaction, so rules the summary dropped are back in context before the next turn."
     }
   ]
 }
