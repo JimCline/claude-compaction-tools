@@ -28,5 +28,10 @@ async function main() {
 }
 
 // A hook that throws would surface an error on every session start and every
-// compaction. Nothing here is worth interrupting the session for.
-main().catch(() => {});
+// compaction, and nothing here is worth interrupting a session for. But a
+// silent catch turns any fault into "the directive simply never appeared",
+// which is indistinguishable from working correctly — so the reason goes to
+// stderr, which hook debugging shows and the model's context does not.
+main().catch((err) => {
+  process.stderr.write('compaction-guard: ' + (err && err.message ? err.message : err) + '\n');
+});

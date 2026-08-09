@@ -1,6 +1,6 @@
 {
   "name": "compaction-guard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Re-states your standing directives after every compaction, so rules the summary dropped are back in context before the next turn.",
   "author": {
     "name": "Jim Cline",
