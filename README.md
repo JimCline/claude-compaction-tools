@@ -95,6 +95,8 @@ setup` any time to change your mind.
 /idle-compact prompt clear    stop sending one
 /idle-compact test            show which injection method would be used
 /idle-compact test send       actually type a harmless command, end to end
+/idle-compact stats           how many times it has autocompacted, per session and total
+/idle-compact stats reset     clear the fire history
 /idle-compact doctor          full diagnostics
 /idle-compact paths           absolute node and plugin paths
 /idle-compact reset           restore defaults

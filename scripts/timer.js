@@ -14,6 +14,7 @@ const fs = require('fs');
 const state = require('./lib/state');
 const transcript = require('./lib/transcript');
 const inject = require('./lib/inject');
+const stats = require('./lib/stats');
 
 const POLL_MS = 15 * 1000;
 // Claude Code writes the closing assistant message around the time the Stop
@@ -37,6 +38,11 @@ function finish(record, outcome) {
     fs.writeFileSync(statePath, JSON.stringify(record, null, 2) + '\n');
   } catch (_) {
     /* the state file is a diagnostic, not a correctness requirement */
+  }
+  try {
+    stats.record(record.sessionId, record.fired);
+  } catch (_) {
+    /* the fire log is a diagnostic, not a correctness requirement */
   }
   process.exit(0);
 }

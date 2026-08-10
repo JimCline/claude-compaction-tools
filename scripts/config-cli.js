@@ -12,6 +12,7 @@ const state = require('./lib/state');
 const inject = require('./lib/inject');
 const prompt = require('./lib/prompt');
 const repo = require('./lib/repo');
+const stats = require('./lib/stats');
 
 const argv = process.argv.slice(2);
 const asJson = argv.includes('--json');
@@ -191,6 +192,57 @@ function testInjection() {
   if (!result.ok) process.exit(1);
 }
 
+function statsCommand() {
+  const sub = (args[1] || 'show').toLowerCase();
+
+  if (sub === 'reset') {
+    stats.reset();
+    return out('compaction stats cleared', { ok: true });
+  }
+  if (sub !== 'show') return fail('unknown stats command: ' + sub + ' (expected show or reset)');
+
+  const summary = stats.summarize();
+  const lines = [
+    'autocompactions: ' + summary.ok,
+    'attempts:        ' +
+      summary.totalAttempts +
+      '  (' +
+      summary.ok +
+      ' ok, ' +
+      summary.activitySkipped +
+      ' skipped-activity, ' +
+      summary.failed +
+      ' failed)',
+  ];
+
+  const ids = Object.keys(summary.sessions).sort(
+    (a, b) => summary.sessions[b].lastAt - summary.sessions[a].lastAt
+  );
+  if (ids.length) {
+    lines.push('');
+    lines.push('per session:');
+    for (const id of ids) {
+      const s = summary.sessions[id];
+      lines.push(
+        '  ' +
+          id.slice(0, 8) +
+          '  ' +
+          s.ok +
+          ' autocompaction' +
+          (s.ok === 1 ? '' : 's') +
+          '  (last ' +
+          new Date(s.lastAt).toISOString() +
+          ')'
+      );
+    }
+  } else {
+    lines.push('');
+    lines.push('no recorded fires yet');
+  }
+
+  return out(lines.join('\n'), { ok: true, stats: summary });
+}
+
 function main() {
   const cmd = (args[0] || 'status').toLowerCase();
 
@@ -263,6 +315,9 @@ function main() {
 
     case 'prompt':
       return promptCommand();
+
+    case 'stats':
+      return statsCommand();
 
     case 'test':
       return testInjection();

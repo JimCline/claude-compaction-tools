@@ -1,6 +1,6 @@
 ---
 name: idle-compact
-description: Turn idle auto-compaction on or off, set the idle threshold, test injection, or run diagnostics
+description: Turn idle auto-compaction on or off, set the idle threshold, test injection, show fire stats, or run diagnostics
 disable-model-invocation: true
 ---
 
@@ -33,6 +33,8 @@ Map the arguments to exactly one Bash command:
 | `prompt clear` | `CLI prompt clear` |
 | `test` | `CLI test` |
 | `test send` | `CLI test --send` |
+| `stats` | `CLI stats` |
+| `stats reset` | `CLI stats reset` |
 | `doctor` | `DOCTOR` |
 | `reset` | `CLI reset` |
 | `setup` | Run the setup conversation described below |

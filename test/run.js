@@ -448,6 +448,34 @@ console.log('\nmalformed input');
   check('disarm survives a payload with no session_id', r2.status === 0, r2.stderr);
 }
 
+// ---------------------------------------------------------------------------
+console.log('\nfire stats');
+{
+  // 'fire-now' (failed, no injection provider) and 'activity' (skipped,
+  // activity-detected) both fired earlier in this run; 'wrong-armid',
+  // 'dead-claude', and 'not-yet' never called finish() so left no record.
+  const before = JSON.parse(cli(['stats', '--json']).stdout).stats;
+  check('counts every finish() as an attempt', before.totalAttempts === 2, JSON.stringify(before));
+  check('classifies the no-provider fire as failed', before.failed === 1, JSON.stringify(before));
+  check('classifies activity-detected as skipped, not failed', before.activitySkipped === 1, JSON.stringify(before));
+  check('an unfired session records nothing', !before.sessions['wrong-armid']);
+  check('a dead-claude session records nothing', !before.sessions['dead-claude']);
+  check('a not-yet-due session records nothing', !before.sessions['not-yet']);
+
+  const shown = cli(['stats']).stdout;
+  check('text output lists the failed session by id', /fire-now/.test(shown), shown);
+  check('text output lists the skipped session by id', /activity/.test(shown), shown);
+  check('text output reports zero autocompactions when nothing succeeded', /autocompactions: 0/.test(shown), shown);
+
+  check('stats reset clears the log', /compaction stats cleared/.test(cli(['stats', 'reset']).stdout));
+  const after = JSON.parse(cli(['stats', '--json']).stdout).stats;
+  check('reset leaves no attempts', after.totalAttempts === 0, JSON.stringify(after));
+  check('reset leaves no sessions', Object.keys(after.sessions).length === 0, JSON.stringify(after));
+  check('stats with no fires says so', /no recorded fires yet/.test(cli(['stats']).stdout));
+
+  check('rejects an unknown stats subcommand', cli(['stats', 'bogus']).status === 1);
+}
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 fs.rmSync(SANDBOX, { recursive: true, force: true });
 process.exit(fail ? 1 : 0);
