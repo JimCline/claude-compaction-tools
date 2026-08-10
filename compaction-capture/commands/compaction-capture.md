@@ -1,6 +1,7 @@
 ---
 name: compaction-capture
 description: Save each compaction summary to a file — turn capture on or off for this repo, or check where captures are going
+argument-hint: "[status | on | off | where | now]"
 disable-model-invocation: true
 ---
 

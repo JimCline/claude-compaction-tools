@@ -9,19 +9,19 @@
     {
       "name": "idle-compactor",
       "source": "./",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "description": "Runs /compact automatically when a session goes idle, timed to land just before the Anthropic prompt cache expires."
     },
     {
       "name": "compaction-capture",
       "source": "./compaction-capture",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "description": "Saves each compaction summary to a file after compaction completes, so the context a session dropped is still on disk."
     },
     {
       "name": "compaction-guard",
       "source": "./compaction-guard",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "description": "Re-states your standing directives after every compaction, so rules the summary dropped are back in context before the next turn."
     }
   ]

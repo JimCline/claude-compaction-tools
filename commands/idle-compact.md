@@ -1,6 +1,7 @@
 ---
 name: idle-compact
 description: Turn idle auto-compaction on or off, set the idle threshold, test injection, show fire stats, or run diagnostics
+argument-hint: "[status | on | off | 1h | 5m | <minutes> | min-tokens <n> | blind on|off | prompt | test | stats | doctor | reset | setup]"
 disable-model-invocation: true
 ---
 

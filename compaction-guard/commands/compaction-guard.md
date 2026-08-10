@@ -1,6 +1,7 @@
 ---
 name: compaction-guard
 description: Keep standing directives alive across compaction — turn the guard on or off for this repo, inspect the injected text, or replace it with your own
+argument-hint: "[status | show | on | off | mode default|append|replace | set <file> | reset]"
 disable-model-invocation: true
 ---
 
