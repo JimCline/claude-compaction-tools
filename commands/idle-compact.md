@@ -34,6 +34,7 @@ Map the arguments to exactly one Bash command:
 | `test` | `CLI test` |
 | `test send` | `CLI test --send` |
 | `stats` | `CLI stats` |
+| `stats sessions` | `CLI stats sessions` |
 | `stats reset` | `CLI stats reset` |
 | `doctor` | `DOCTOR` |
 | `reset` | `CLI reset` |

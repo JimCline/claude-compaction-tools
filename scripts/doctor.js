@@ -6,11 +6,10 @@
 
 const os = require('os');
 const fs = require('fs');
-const path = require('path');
 
 const config = require('./lib/config');
-const state = require('./lib/state');
 const inject = require('./lib/inject');
+const live = require('./lib/sessions');
 
 const lines = [];
 function say(s) {
@@ -82,22 +81,26 @@ for (const bin of ['tmux', 'screen', 'wezterm', 'kitty', 'osascript', 'xdotool',
 }
 
 say('');
-const sessions = state.listSessions();
-say('armed sessions: ' + sessions.length);
-for (const file of sessions) {
-  const r = state.readPath(file);
-  if (!r) continue;
-  const secs = Math.max(0, Math.round((r.fireAt - Date.now()) / 1000));
+const view = live.describe();
+say('live sessions: ' + view.sessions.length);
+for (const s of view.sessions) {
   say(
     '  ' +
-      path.basename(file) +
-      '  fires in ' +
-      secs +
-      's  ctx=' +
-      (r.contextTokens == null ? 'unknown' : r.contextTokens) +
+      s.shortId +
+      '  ' +
+      s.status +
+      (s.detail ? '/' + s.detail : '') +
+      '  fireAt=' +
+      (s.fireAt ? new Date(s.fireAt).toISOString() : 'unknown') +
+      '  ctx=' +
+      (s.contextTokens == null ? 'unknown' : s.contextTokens) +
+      '  claude=' +
+      (s.claudePid || '-') +
+      (s.claudePid && !s.claudeAlive ? ' (dead)' : '') +
       '  timer=' +
-      (state.isAlive(r.timerPid) ? 'alive' : 'dead') +
-      (r.fired ? '  last=' + JSON.stringify(r.fired) : '')
+      (s.timerPid || '-') +
+      (s.timerPid && !s.timerAlive ? ' (dead)' : '') +
+      (s.fired ? '  last=' + JSON.stringify(s.fired) : '')
   );
 }
 

@@ -555,6 +555,79 @@ console.log('\nfire stats');
   check('rejects an unknown stats subcommand', cli(['stats', 'bogus']).status === 1);
 }
 
+// ---------------------------------------------------------------------------
+console.log('\nlive session view');
+{
+  // Wipe first: 'off' clears every state file, so the empty-case assertion is
+  // deterministic no matter what earlier blocks left behind.
+  cli(['off']);
+  check('reports an empty live view', /no live sessions/.test(cli(['stats', 'sessions']).stdout));
+
+  const now = Date.now();
+  seedState('live-ticking', {
+    fireAt: now + 10 * 60 * 1000,
+    timerPid: process.pid,
+    claudePid: process.pid,
+  });
+  seedState('live-due', {
+    fireAt: now - 5000,
+    timerPid: process.pid,
+    claudePid: process.pid,
+  });
+  seedState('live-ok', {
+    timerPid: process.pid,
+    fired: { at: now - 60 * 1000, ok: true, provider: 'tmux' },
+  });
+  seedState('live-skipped', {
+    timerPid: process.pid,
+    fired: { at: now - 120 * 1000, ok: false, reason: 'activity-detected', detail: 'user-turn' },
+  });
+  seedState('live-orphan', { claudePid: 999999, timerPid: 999999 });
+  seedState('live-notimer', {
+    fireAt: now + 10 * 60 * 1000,
+    timerPid: null,
+    claudePid: process.pid,
+  });
+
+  const r = cli(['stats', 'sessions', '--json']);
+  check('stats sessions exits 0', r.status === 0, r.stderr);
+
+  const view = JSON.parse(r.stdout);
+  const by = {};
+  for (const s of view.sessions) by[s.sessionId] = s;
+
+  check('classifies a counting-down session', by['live-ticking'].status === 'counting-down',
+    JSON.stringify(by['live-ticking']));
+  check('reports time to compact', by['live-ticking'].dueInMs > 9 * 60 * 1000,
+    String(by['live-ticking'].dueInMs));
+  check('classifies an overdue session as due', by['live-due'].status === 'due',
+    JSON.stringify(by['live-due']));
+  check('gives a due session no countdown', by['live-due'].dueInMs === null,
+    String(by['live-due'].dueInMs));
+  check('classifies a successful fire', by['live-ok'].status === 'fired' && by['live-ok'].detail === 'ok',
+    JSON.stringify(by['live-ok']));
+  check('classifies an activity-skipped fire',
+    by['live-skipped'].status === 'fired' && by['live-skipped'].detail === 'activity-skipped',
+    JSON.stringify(by['live-skipped']));
+  check('classifies a dead claude process as orphaned',
+    by['live-orphan'].status === 'orphaned' && by['live-orphan'].detail === 'session-gone',
+    JSON.stringify(by['live-orphan']));
+  // An unrecorded timer pid is unknown, not dead: arm.js writes the record
+  // before it knows the pid, so treating null as dead would libel a healthy arm.
+  check('treats an unrecorded timer pid as still counting down',
+    by['live-notimer'].status === 'counting-down' && by['live-notimer'].timerAlive === false,
+    JSON.stringify(by['live-notimer']));
+
+  const shown = cli(['stats', 'sessions']).stdout;
+  check('text view names the counting-down state', /counting down/.test(shown), shown);
+  check('text view names the orphaned state', /orphaned/.test(shown), shown);
+  check('text view formats a countdown as minutes and seconds', /fires in \d+m \d\ds/.test(shown), shown);
+
+  check('stats show carries the live block too', /live sessions:/.test(cli(['stats']).stdout));
+  check('status carries the live block too', /live sessions:/.test(cli(['status']).stdout));
+  check('rejects an unknown stats subcommand', cli(['stats', 'bogus']).status === 1);
+}
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 fs.rmSync(SANDBOX, { recursive: true, force: true });
 process.exit(fail ? 1 : 0);

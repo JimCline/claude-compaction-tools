@@ -13,6 +13,7 @@ const inject = require('./lib/inject');
 const prompt = require('./lib/prompt');
 const repo = require('./lib/repo');
 const stats = require('./lib/stats');
+const live = require('./lib/sessions');
 
 const argv = process.argv.slice(2);
 const asJson = argv.includes('--json');
@@ -104,41 +105,13 @@ function promptCommand() {
 
 function status() {
   const cfg = config.resolve();
-  const armed = state
-    .listSessions()
-    .map((f) => state.readPath(f))
-    .filter(Boolean)
-    .map((r) => ({
-      sessionId: r.sessionId,
-      firesInSeconds: Math.max(0, Math.round((r.fireAt - Date.now()) / 1000)),
-      contextTokens: r.contextTokens,
-      timerAlive: state.isAlive(r.timerPid),
-      fired: r.fired || null,
-    }));
-
-  const lines = [describe(cfg)];
-  if (armed.length) {
-    lines.push('');
-    lines.push('armed sessions:');
-    for (const a of armed) {
-      lines.push(
-        '  ' +
-          a.sessionId.slice(0, 8) +
-          '  fires in ' +
-          Math.floor(a.firesInSeconds / 60) +
-          'm' +
-          (a.firesInSeconds % 60) +
-          's' +
-          '  ctx=' +
-          (a.contextTokens == null ? 'unknown' : a.contextTokens) +
-          (a.timerAlive ? '' : '  (timer not running)')
-      );
-    }
-  } else {
-    lines.push('');
-    lines.push('no armed sessions');
-  }
-  out(lines.join('\n'), { ok: true, config: cfg, armed });
+  const view = live.describe();
+  out([describe(cfg), '', live.render(view)].join('\n'), {
+    ok: true,
+    config: cfg,
+    sessions: view.sessions,
+    counts: view.counts,
+  });
 }
 
 function testInjection() {
@@ -199,7 +172,18 @@ function statsCommand() {
     stats.reset();
     return out('compaction stats cleared', { ok: true });
   }
-  if (sub !== 'show') return fail('unknown stats command: ' + sub + ' (expected show or reset)');
+  if (sub === 'sessions') {
+    const view = live.describe();
+    return out(live.render(view), {
+      ok: true,
+      now: view.now,
+      counts: view.counts,
+      sessions: view.sessions,
+    });
+  }
+  if (sub !== 'show') {
+    return fail('unknown stats command: ' + sub + ' (expected show, sessions, or reset)');
+  }
 
   const summary = stats.summarize();
   const lines = [
@@ -240,7 +224,16 @@ function statsCommand() {
     lines.push('no recorded fires yet');
   }
 
-  return out(lines.join('\n'), { ok: true, stats: summary });
+  const view = live.describe();
+  lines.push('');
+  lines.push(live.render(view));
+
+  return out(lines.join('\n'), {
+    ok: true,
+    stats: summary,
+    counts: view.counts,
+    sessions: view.sessions,
+  });
 }
 
 function main() {

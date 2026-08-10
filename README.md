@@ -96,6 +96,7 @@ setup` any time to change your mind.
 /idle-compact test            show which injection method would be used
 /idle-compact test send       actually type a harmless command, end to end
 /idle-compact stats           how many times it has autocompacted, per session and total
+/idle-compact stats sessions  live view: every session's idle state and time to compact
 /idle-compact stats reset     clear the fire history
 /idle-compact doctor          full diagnostics
 /idle-compact paths           absolute node and plugin paths
