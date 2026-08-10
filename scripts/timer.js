@@ -69,7 +69,26 @@ function tick() {
       process.exit(0);
     }
     if (mtime > record.armedAt + ACTIVITY_GRACE_MS) {
-      return finish(record, { ok: false, reason: 'activity-detected' });
+      // The file moved, but Claude Code writes its own entries into an idle
+      // session's transcript (away_summary recaps, stop_hook_summary,
+      // turn_duration), so an mtime bump is not evidence the user came back.
+      // Only a genuine user turn is. A null reading means we could not tell,
+      // and not firing is the cheaper mistake.
+      const lastUser = transcript.lastUserTurnMs(record.transcriptPath);
+      if (lastUser === null) {
+        return finish(record, {
+          ok: false,
+          reason: 'activity-detected',
+          detail: 'indeterminate',
+        });
+      }
+      if (lastUser > record.armedAt + ACTIVITY_GRACE_MS) {
+        return finish(record, {
+          ok: false,
+          reason: 'activity-detected',
+          detail: 'user-turn',
+        });
+      }
     }
   }
 

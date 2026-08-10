@@ -21,6 +21,7 @@ function record(sessionId, fired) {
     sessionId,
     ok: !!(fired && fired.ok),
     reason: (fired && fired.reason) || null,
+    detail: (fired && fired.detail) || null,
   });
   fs.appendFileSync(LOG_PATH, line + '\n');
 }

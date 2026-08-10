@@ -38,9 +38,14 @@ function runScript(script, input, extraEnv, argv) {
   });
 }
 
-function writeTranscript(tokens) {
+function writeTranscript(tokens, opts) {
+  const o = opts || {};
+  const user = { type: 'user', message: { role: 'user', content: 'hi' } };
+  if (!o.omitUserTimestamp) {
+    user.timestamp = new Date(o.userTimestamp || Date.now()).toISOString();
+  }
   const lines = [
-    JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } }),
+    JSON.stringify(user),
     JSON.stringify({
       type: 'assistant',
       message: {
@@ -53,6 +58,7 @@ function writeTranscript(tokens) {
       },
     }),
   ];
+  for (const extra of o.extraLines || []) lines.push(JSON.stringify(extra));
   fs.writeFileSync(TRANSCRIPT, lines.join('\n') + '\n');
 }
 
@@ -201,7 +207,6 @@ function seedState(id, overrides) {
       sessionId: id,
       cwd: SANDBOX,
       transcriptPath: TRANSCRIPT,
-      transcriptMtime: null,
       contextTokens: 50000,
       armedAt: now - 2000,
       fireAt: now - 1000,
@@ -259,6 +264,53 @@ function runTimer(id, armId) {
   check(
     'aborts on post-arm transcript activity',
     !!after && after.fired && after.fired.reason === 'activity-detected',
+    JSON.stringify(after && after.fired)
+  );
+}
+
+{
+  // Claude Code's own away_summary recap lands mid-window and bumps the file's
+  // mtime. The user never touched anything, so the timer must still fire.
+  const rec = seedState('system-noise', { armedAt: Date.now() - 10 * 60 * 1000 });
+  writeTranscript(50000, {
+    userTimestamp: Date.now() - 11 * 60 * 1000,
+    extraLines: [
+      {
+        type: 'system',
+        subtype: 'away_summary',
+        content: 'recap of what we were doing',
+        timestamp: new Date().toISOString(),
+        isMeta: false,
+        userType: 'external',
+      },
+    ],
+  });
+  const r = runTimer('system-noise', rec.armId);
+  const after = sessionState('system-noise');
+  check('exits 0 on a system-only transcript write', r.status === 0, r.stderr);
+  check(
+    'does not treat a system entry as user activity',
+    !!after && after.fired && after.fired.reason !== 'activity-detected',
+    JSON.stringify(after && after.fired)
+  );
+  check(
+    'proceeds to fire after a system-only write',
+    !!after && after.fired && after.fired.ok === false,
+    JSON.stringify(after && after.fired)
+  );
+}
+
+{
+  // No parseable timestamp on the newest user turn: we cannot tell whether the
+  // user came back, so the conservative answer is to skip the compaction.
+  const rec = seedState('stale-stamp', { armedAt: Date.now() - 10 * 60 * 1000 });
+  writeTranscript(50000, { omitUserTimestamp: true });
+  const r = runTimer('stale-stamp', rec.armId);
+  const after = sessionState('stale-stamp');
+  check('exits 0 when user activity is indeterminate', r.status === 0, r.stderr);
+  check(
+    'skips the fire when the last user turn cannot be dated',
+    !!after && after.fired && after.fired.detail === 'indeterminate',
     JSON.stringify(after && after.fired)
   );
 }
@@ -451,16 +503,43 @@ console.log('\nmalformed input');
 // ---------------------------------------------------------------------------
 console.log('\nfire stats');
 {
-  // 'fire-now' (failed, no injection provider) and 'activity' (skipped,
-  // activity-detected) both fired earlier in this run; 'wrong-armid',
-  // 'dead-claude', and 'not-yet' never called finish() so left no record.
+  // 'fire-now' and 'system-noise' (failed, no injection provider) and
+  // 'activity' and 'stale-stamp' (skipped, activity-detected) all fired
+  // earlier in this run; 'wrong-armid', 'dead-claude', and 'not-yet' never
+  // called finish() so left no record.
   const before = JSON.parse(cli(['stats', '--json']).stdout).stats;
-  check('counts every finish() as an attempt', before.totalAttempts === 2, JSON.stringify(before));
-  check('classifies the no-provider fire as failed', before.failed === 1, JSON.stringify(before));
-  check('classifies activity-detected as skipped, not failed', before.activitySkipped === 1, JSON.stringify(before));
+  check('counts every finish() as an attempt', before.totalAttempts === 4, JSON.stringify(before));
+  check('classifies the no-provider fire as failed', before.failed === 2, JSON.stringify(before));
+  check('classifies activity-detected as skipped, not failed', before.activitySkipped === 2, JSON.stringify(before));
   check('an unfired session records nothing', !before.sessions['wrong-armid']);
   check('a dead-claude session records nothing', !before.sessions['dead-claude']);
   check('a not-yet-due session records nothing', !before.sessions['not-yet']);
+
+  const fireLogPath = path.join(SANDBOX, '.claude', 'idle-compactor', 'fires.log');
+  const fireLines = fs
+    .readFileSync(fireLogPath, 'utf8')
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l));
+  function lastDetailFor(sessionId) {
+    const matches = fireLines.filter((e) => e.sessionId === sessionId);
+    return matches.length ? matches[matches.length - 1].detail : undefined;
+  }
+  check(
+    "'system-noise' reached real injection, so detail is null",
+    lastDetailFor('system-noise') === null,
+    String(lastDetailFor('system-noise'))
+  );
+  check(
+    "'stale-stamp' aborted with an indeterminate last user turn",
+    lastDetailFor('stale-stamp') === 'indeterminate',
+    String(lastDetailFor('stale-stamp'))
+  );
+  check(
+    "'activity' aborted on a genuine, timestamped user turn",
+    lastDetailFor('activity') === 'user-turn',
+    String(lastDetailFor('activity'))
+  );
 
   const shown = cli(['stats']).stdout;
   check('text output lists the failed session by id', /fire-now/.test(shown), shown);

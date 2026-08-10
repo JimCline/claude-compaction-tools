@@ -52,7 +52,6 @@ async function main() {
     sessionId,
     cwd,
     transcriptPath: transcriptPath || null,
-    transcriptMtime: transcriptPath ? transcript.mtimeMs(transcriptPath) : null,
     contextTokens: tokens,
     armedAt,
     fireAt: armedAt + cfg.idleMinutes * 60 * 1000,
