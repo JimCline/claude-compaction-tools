@@ -53,6 +53,20 @@ function compactCommand(cwd, cfg) {
   return resolved.text ? '/compact ' + resolved.text : '/compact';
 }
 
+// Deliberately not a slash command: Claude Code would intercept it before it
+// ever became a real user turn, so the cache would never actually get read.
+// Must stay a single line — injection providers type it as one, and a
+// newline would submit early and split it into two turns. Must stay
+// byte-stable across releases: disarm.js compares the submitted prompt
+// against this string verbatim to recognise the plugin's own ping.
+const KEEPALIVE_SENTINEL =
+  '[idle-compactor keepalive] Cache keepalive ping. Do not use any tools and ' +
+  'do not take any action. Reply with exactly: ok';
+
+function keepaliveCommand() {
+  return KEEPALIVE_SENTINEL;
+}
+
 function describe(cwd, cfg) {
   const resolved = resolveFor(cwd, cfg);
   if (!resolved.path) return 'compaction prompt: none';
@@ -63,4 +77,12 @@ function describe(cwd, cfg) {
   );
 }
 
-module.exports = { MAX_CHARS, flatten, resolveFor, compactCommand, describe };
+module.exports = {
+  MAX_CHARS,
+  KEEPALIVE_SENTINEL,
+  flatten,
+  resolveFor,
+  compactCommand,
+  keepaliveCommand,
+  describe,
+};

@@ -34,10 +34,13 @@ function fail(message) {
 
 function describe(cfg) {
   const source = cfg.idleMinutesIsDefault
-    ? 'derived from the ' + cfg.cacheTtl + ' cache TTL minus ' + config.graceMinutesFor(cfg.cacheTtl) + ' min'
+    ? 'derived from the ' + cfg.cacheTtl + ' cache TTL minus ' + config.effectiveGraceMinutes(cfg) + ' min'
     : 'explicit override';
   return [
     'idle-compactor: ' + (cfg.enabled ? 'ON' : 'OFF'),
+    'mode:           ' +
+      cfg.idleAction +
+      (cfg.idleAction === 'keepalive' ? ' (max ' + cfg.keepaliveMaxPings + ' pings)' : ''),
     'idle threshold: ' + cfg.idleMinutes + ' min (' + source + ')',
     'cache TTL mode: ' + cfg.cacheTtl,
     'minimum context: ' + cfg.minTokens + ' tokens',
@@ -264,6 +267,13 @@ function main() {
         if (!Object.prototype.hasOwnProperty.call(config.TTL_MINUTES, value)) {
           return fail('ttl must be one of: ' + Object.keys(config.TTL_MINUTES).join(', '));
         }
+        const current = config.resolve();
+        if (value === '5m' && current.idleAction === 'keepalive') {
+          return fail(
+            'cannot use ttl 5m in keepalive mode: pinging a 5-minute cache loses money inside ' +
+              'the hour. Switch action to compact first, or keep ttl 1h.'
+          );
+        }
         // Choosing a TTL means "use that TTL's derived default", so any
         // previous explicit minute count is cleared.
         config.write({ cacheTtl: value, idleMinutes: null });
@@ -281,7 +291,30 @@ function main() {
         config.write({ minTokens: n });
         return out(describe(config.resolve()), { ok: true, config: config.resolve() });
       }
-      return fail('unknown setting: ' + key + ' (expected ttl, minutes, or min-tokens)');
+      if (key === 'action') {
+        const v = (value || '').toLowerCase();
+        if (v !== 'compact' && v !== 'keepalive') return fail('action must be compact or keepalive');
+        const current = config.resolve();
+        if (v === 'keepalive' && current.cacheTtl === '5m') {
+          return fail(
+            'cannot enable keepalive under the 5-minute cache TTL: it loses money inside the ' +
+              'hour. Run "/idle-compact 1h" first, or set ttl 1h.'
+          );
+        }
+        // Choosing an action means "use that action's derived default",
+        // same reasoning as choosing a TTL above.
+        config.write({ idleAction: v, idleMinutes: null });
+        return out(describe(config.resolve()), { ok: true, config: config.resolve() });
+      }
+      if (key === 'max-pings') {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) {
+          return fail('max-pings must be a positive integer');
+        }
+        config.write({ keepaliveMaxPings: n });
+        return out(describe(config.resolve()), { ok: true, config: config.resolve() });
+      }
+      return fail('unknown setting: ' + key + ' (expected ttl, minutes, min-tokens, action, or max-pings)');
     }
 
     case 'blind': {

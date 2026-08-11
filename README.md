@@ -4,7 +4,8 @@ Three Claude Code plugins for managing context compaction.
 
 - **idle-compactor** — runs `/compact` automatically when a session goes idle,
   timed to land just before the Anthropic prompt cache expires, optionally with
-  your own focus instructions attached.
+  your own focus instructions attached. An opt-in **keepalive mode** pings the
+  cache instead of compacting, for when you want to keep local context intact.
 - **compaction-capture** — writes each compaction summary to a file after the
   fact, so the context a session dropped is still on disk.
 - **compaction-guard** — re-states your standing directives after every
@@ -89,6 +90,9 @@ setup` any time to change your mind.
 /idle-compact 25              use an explicit 25-minute threshold
 /idle-compact min-tokens 40000   only compact above this context size
 /idle-compact min-tokens 0       no floor; compact whenever idle
+/idle-compact keepalive       ping the cache instead of compacting (see below)
+/idle-compact compact         switch back to the default /compact mode
+/idle-compact max-pings 12    stop keepalive after this many pings (default 12)
 /idle-compact blind on|off    allow or block focus-based injection
 /idle-compact prompt          set the focus instructions sent with /compact
 /idle-compact prompt show     what would be sent, and from which file
@@ -164,6 +168,32 @@ Two things worth knowing:
   line, so an embedded newline would submit the command early and leave the
   remainder as a stray prompt. Anything past 800 characters is dropped, and
   `prompt show` tells you when that happens.
+
+## Keepalive mode
+
+`/compact` is the default, but sometimes you want the opposite: keep your
+**local** conversation exactly as it is, but stop the **server-side** prompt
+cache from going cold while you're away. `/idle-compact keepalive` switches to
+that mode.
+
+Instead of typing `/compact`, the plugin pings the idle session with a short,
+do-nothing message on the same idle cadence, so Claude's reply refreshes the
+cache without summarizing anything away. It only makes economic sense on the
+1-hour cache TTL — pinging a 5-minute cache costs more than it saves within
+the hour — so `keepalive` refuses to enable itself under `ttl 5m`.
+
+```
+/idle-compact keepalive         switch to keepalive mode
+/idle-compact compact           switch back to the default /compact mode
+/idle-compact max-pings 12      stop after this many pings (default 12, ~11h)
+```
+
+Each ping is classified as a cache **hit** or **miss** from the usage block of
+Claude's reply to it, and the running hit rate shows up in `/idle-compact
+doctor`. If a ping's injection fails outright — no terminal provider
+available, or the provider errored — the loop simply stops rather than
+retrying blind: nothing was typed, so nothing was spent, and it will not try
+again until you return and a new turn re-arms it.
 
 ## Safety gates
 
@@ -344,8 +374,10 @@ node compaction-guard/test/run.js     # compaction-guard
 
 The suites run against a throwaway `HOME`, so they never touch your real
 `~/.claude`. The first covers token accounting, threshold derivation, the
-arm/disarm/re-arm lifecycle, every timer abort path, the compaction prompt, the
-CLI, and the first-run notice. The second covers summary extraction, the
+arm/disarm/re-arm lifecycle, every timer abort path, keepalive's ping/confirm/
+cap loop and its own-ping-vs-real-activity disarm guard, the compaction
+prompt, the CLI, and the first-run notice. The second covers summary
+extraction, the
 per-repo location store, the front matter, duplicate suppression, and the
 malformed-input paths. The third covers which events inject and which are
 skipped, the `PostCompact`-only recovery paragraph, malformed payloads — and

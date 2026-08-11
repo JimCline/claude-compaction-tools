@@ -21,12 +21,15 @@ const SESSION_DIR = path.join(ROOT, 'sessions');
 const DEFAULTS = {
   enabled: true,
   cacheTtl: DEFAULT_TTL,
-  idleMinutes: null, // null => derive from cacheTtl
+  idleMinutes: null, // null => derive from cacheTtl and idleAction
   minTokens: 20000,
   allowBlindInjection: false,
   setupCompleted: false,
   promptPath: null, // user-level compaction prompt file
   prompts: {}, // repo key => compaction prompt file, overrides promptPath
+  idleAction: 'compact', // 'compact' | 'keepalive'
+  keepaliveMaxPings: 12,
+  keepaliveGraceMinutes: 5,
 };
 
 function ensureRoot() {
@@ -42,6 +45,29 @@ function graceMinutesFor(ttl) {
 function defaultMinutesFor(ttl) {
   const key = Object.prototype.hasOwnProperty.call(TTL_MINUTES, ttl) ? ttl : DEFAULT_TTL;
   return Math.max(1, TTL_MINUTES[key] - graceMinutesFor(key));
+}
+
+// Keepalive pings the cache instead of compacting, so a missed window is far
+// costlier than in compact mode: a full-price cache write instead of a cheap
+// read, repeated on every subsequent ping. That asymmetry is why its grace is
+// its own configurable knob rather than sharing GRACE_MINUTES.
+function keepaliveMinutesFor(ttl, cfg) {
+  const key = Object.prototype.hasOwnProperty.call(TTL_MINUTES, ttl) ? ttl : DEFAULT_TTL;
+  const grace =
+    cfg && Number.isFinite(Number(cfg.keepaliveGraceMinutes))
+      ? Number(cfg.keepaliveGraceMinutes)
+      : DEFAULTS.keepaliveGraceMinutes;
+  return Math.max(1, TTL_MINUTES[key] - grace);
+}
+
+function effectiveIdleMinutes(cfg) {
+  return cfg.idleAction === 'keepalive'
+    ? keepaliveMinutesFor(cfg.cacheTtl, cfg)
+    : defaultMinutesFor(cfg.cacheTtl);
+}
+
+function effectiveGraceMinutes(cfg) {
+  return cfg.idleAction === 'keepalive' ? cfg.keepaliveGraceMinutes : graceMinutesFor(cfg.cacheTtl);
 }
 
 function read() {
@@ -106,11 +132,11 @@ function resolve(env) {
   if (falsy(env.CLAUDE_IDLE_COMPACT_ALLOW_BLIND)) cfg.allowBlindInjection = false;
 
   if (!Number.isFinite(Number(cfg.idleMinutes)) || Number(cfg.idleMinutes) <= 0) {
-    cfg.idleMinutes = defaultMinutesFor(cfg.cacheTtl);
+    cfg.idleMinutes = effectiveIdleMinutes(cfg);
     cfg.idleMinutesIsDefault = true;
   } else {
     cfg.idleMinutes = Number(cfg.idleMinutes);
-    cfg.idleMinutesIsDefault = cfg.idleMinutes === defaultMinutesFor(cfg.cacheTtl);
+    cfg.idleMinutesIsDefault = cfg.idleMinutes === effectiveIdleMinutes(cfg);
   }
 
   return cfg;
@@ -127,6 +153,9 @@ module.exports = {
   ensureRoot,
   defaultMinutesFor,
   graceMinutesFor,
+  keepaliveMinutesFor,
+  effectiveIdleMinutes,
+  effectiveGraceMinutes,
   read,
   write,
   setPromptPath,

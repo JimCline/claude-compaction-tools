@@ -13,6 +13,7 @@ const path = require('path');
 const config = require('./config');
 
 const LOG_PATH = path.join(config.ROOT, 'fires.log');
+const PING_LOG_PATH = path.join(config.ROOT, 'pings.log');
 
 function record(sessionId, fired) {
   config.ensureRoot();
@@ -86,4 +87,76 @@ function reset() {
   }
 }
 
-module.exports = { LOG_PATH, record, readAll, summarize, reset };
+// A keepalive ping is confirmed once Claude's reply lands, so classification
+// reads that reply's own usage block — cache_read_input_tokens dominant means
+// the ping refreshed a still-warm cache (hit); cache_creation_input_tokens
+// dominant means the cache had already expired and this ping paid a full
+// re-write instead (miss). Mirrors the fields transcript.contextTokens()
+// already relies on, rather than the nested per-TTL cache_creation breakdown.
+function classifyPingUsage(usage) {
+  if (!usage) return null;
+  const read = usage.cache_read_input_tokens || 0;
+  const created = usage.cache_creation_input_tokens || 0;
+  if (read === 0 && created === 0) return null;
+  return created > read ? 'miss' : 'hit';
+}
+
+function recordPing(sessionId, result) {
+  config.ensureRoot();
+  const line = JSON.stringify({ at: Date.now(), sessionId, result });
+  fs.appendFileSync(PING_LOG_PATH, line + '\n');
+}
+
+function readPings() {
+  let text;
+  try {
+    text = fs.readFileSync(PING_LOG_PATH, 'utf8');
+  } catch (_) {
+    return [];
+  }
+  const events = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      events.push(JSON.parse(line));
+    } catch (_) {
+      /* one corrupt line (e.g. a torn write) shouldn't lose the rest of the log */
+    }
+  }
+  return events;
+}
+
+function summarizePings() {
+  const events = readPings();
+  let hits = 0;
+  let misses = 0;
+  for (const e of events) {
+    if (e.result === 'hit') hits++;
+    else if (e.result === 'miss') misses++;
+  }
+  const total = hits + misses;
+  return { total, hits, misses, missRate: total ? misses / total : 0 };
+}
+
+function resetPings() {
+  try {
+    fs.unlinkSync(PING_LOG_PATH);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+module.exports = {
+  LOG_PATH,
+  PING_LOG_PATH,
+  record,
+  readAll,
+  summarize,
+  reset,
+  classifyPingUsage,
+  recordPing,
+  readPings,
+  summarizePings,
+  resetPings,
+};

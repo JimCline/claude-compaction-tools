@@ -1,7 +1,7 @@
 ---
 name: idle-compact
-description: Turn idle auto-compaction on or off, set the idle threshold, test injection, show fire stats, or run diagnostics
-argument-hint: "[status | on | off | 1h | 5m | <minutes> | min-tokens <n> | blind on|off | prompt | test | stats | doctor | reset | setup]"
+description: Turn idle auto-compaction on or off, set the idle threshold or keepalive mode, test injection, show fire stats, or run diagnostics
+argument-hint: "[status | on | off | 1h | 5m | <minutes> | min-tokens <n> | keepalive | compact | max-pings <n> | blind on|off | prompt | test | stats | doctor | reset | setup]"
 disable-model-invocation: true
 ---
 
@@ -28,6 +28,9 @@ Map the arguments to exactly one Bash command:
 | `5m` or `ttl 5m` | `CLI set ttl 5m` |
 | `<number>` or `minutes <number>` | `CLI set minutes <number>` |
 | `min-tokens <number>` | `CLI set min-tokens <number>` |
+| `keepalive` | `CLI set action keepalive` |
+| `compact` | `CLI set action compact` |
+| `max-pings <number>` | `CLI set max-pings <number>` |
 | `blind on` / `blind off` | `CLI blind on` / `CLI blind off` |
 | `prompt` | Run the prompt conversation described below |
 | `prompt show` | `CLI prompt show` |
@@ -44,6 +47,13 @@ Map the arguments to exactly one Bash command:
 Run the command, then show the user its output. Do not paraphrase the numbers —
 report the threshold and state exactly as printed. Add at most one sentence of
 context.
+
+`keepalive` is a second, opt-in mode: instead of running `/compact`, the
+plugin pings the idle session with a short do-nothing message to keep
+Anthropic's server-side prompt cache warm, so local context is preserved
+instead of being summarized. It is only worth it on the 1-hour cache TTL —
+`CLI set action keepalive` refuses under `ttl 5m` — and it stops itself after
+`max-pings` pings (default 12) rather than pinging forever.
 
 If the arguments match nothing in the table, run `CLI status` and show the user
 the table of accepted forms.

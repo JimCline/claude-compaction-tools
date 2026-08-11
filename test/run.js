@@ -93,6 +93,50 @@ console.log('\ndefault threshold derivation');
   const config = require(path.join(PLUGIN, 'scripts/lib/config.js'));
   check('1h TTL -> 55 minutes', config.defaultMinutesFor('1h') === 55, String(config.defaultMinutesFor('1h')));
   check('5m TTL -> 4 minutes', config.defaultMinutesFor('5m') === 4, String(config.defaultMinutesFor('5m')));
+
+  check(
+    'keepalive derives 55 minutes on the 1h TTL',
+    config.effectiveIdleMinutes({ idleAction: 'keepalive', cacheTtl: '1h', keepaliveGraceMinutes: 5 }) === 55,
+    String(config.effectiveIdleMinutes({ idleAction: 'keepalive', cacheTtl: '1h', keepaliveGraceMinutes: 5 }))
+  );
+  check(
+    'compact mode ignores keepaliveGraceMinutes',
+    config.effectiveIdleMinutes({ idleAction: 'compact', cacheTtl: '1h', keepaliveGraceMinutes: 30 }) === 55,
+    String(config.effectiveIdleMinutes({ idleAction: 'compact', cacheTtl: '1h', keepaliveGraceMinutes: 30 }))
+  );
+  check(
+    'effectiveGraceMinutes follows mode',
+    config.effectiveGraceMinutes({ idleAction: 'keepalive', cacheTtl: '1h', keepaliveGraceMinutes: 5 }) === 5 &&
+      config.effectiveGraceMinutes({ idleAction: 'compact', cacheTtl: '1h' }) === 5
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log('\nkeepalive sentinel');
+{
+  const prompt = require(path.join(PLUGIN, 'scripts/lib/prompt.js'));
+  check('keepaliveCommand returns the sentinel verbatim', prompt.keepaliveCommand() === prompt.KEEPALIVE_SENTINEL);
+  check('sentinel is not a slash command', prompt.KEEPALIVE_SENTINEL[0] !== '/');
+  check('sentinel is a single line', prompt.KEEPALIVE_SENTINEL.indexOf('\n') === -1);
+}
+
+// ---------------------------------------------------------------------------
+console.log('\nping classification');
+{
+  const stats = require(path.join(PLUGIN, 'scripts/lib/stats.js'));
+  check(
+    'read-dominated usage classifies as a hit',
+    stats.classifyPingUsage({ cache_read_input_tokens: 50000, cache_creation_input_tokens: 10 }) === 'hit'
+  );
+  check(
+    'creation-dominated usage classifies as a miss',
+    stats.classifyPingUsage({ cache_read_input_tokens: 10, cache_creation_input_tokens: 50000 }) === 'miss'
+  );
+  check('no usage classifies as null', stats.classifyPingUsage(null) === null);
+  check(
+    'all-zero usage classifies as null',
+    stats.classifyPingUsage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }) === null
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +200,8 @@ console.log('\narm gating');
   check('fireAt is armedAt + 55 min', !!s && s.fireAt - s.armedAt === 55 * 60 * 1000);
   check('records the absolute node path', !!s && s.nodePath === process.execPath);
   check('injects /compact', !!s && s.text === '/compact');
+  check('mode defaults to compact', !!s && s.mode === 'compact', s && s.mode);
+  check('pingCount defaults to 0', !!s && s.pingCount === 0, s && String(s.pingCount));
 }
 
 {
@@ -374,6 +420,36 @@ function cli(argv) {
   check('test dry run exits 0', cli(['test']).status === 0);
   check('paths reports an absolute node binary', /node: \//.test(cli(['paths']).stdout), cli(['paths']).stdout);
   check('setup-done records the flag', /setup recorded/.test(cli(['setup-done']).stdout));
+
+  check('action rejects a bad value', cli(['set', 'action', 'bogus']).status === 1);
+  check(
+    'action keepalive rejects under a 5m ttl',
+    (() => {
+      cli(['set', 'ttl', '5m']);
+      const r = cli(['set', 'action', 'keepalive']);
+      cli(['set', 'ttl', '1h']);
+      return r.status === 1;
+    })()
+  );
+  check(
+    'ttl 5m rejects while in keepalive mode',
+    (() => {
+      cli(['set', 'action', 'keepalive']);
+      const r = cli(['set', 'ttl', '5m']);
+      cli(['set', 'action', 'compact']);
+      return r.status === 1;
+    })()
+  );
+  check('action keepalive shows the mode line', /mode:( +)keepalive/.test(cli(['set', 'action', 'keepalive']).stdout));
+  check(
+    'max-pings shows in the mode line',
+    /mode:( +)keepalive \(max 5 pings\)/.test(cli(['set', 'max-pings', '5']).stdout)
+  );
+  check('max-pings rejects zero', cli(['set', 'max-pings', '0']).status === 1);
+  check('max-pings rejects a negative value', cli(['set', 'max-pings', '-1']).status === 1);
+  check('max-pings rejects non-numeric', cli(['set', 'max-pings', 'abc']).status === 1);
+  check('action compact shows the mode line', /mode:( +)compact$/m.test(cli(['set', 'action', 'compact']).stdout));
+
   check('reset restores defaults', /idle threshold: 55 min/.test(cli(['reset']).stdout));
 }
 
@@ -626,6 +702,143 @@ console.log('\nlive session view');
   check('stats show carries the live block too', /live sessions:/.test(cli(['stats']).stdout));
   check('status carries the live block too', /live sessions:/.test(cli(['status']).stdout));
   check('rejects an unknown stats subcommand', cli(['stats', 'bogus']).status === 1);
+}
+
+// ---------------------------------------------------------------------------
+console.log('\nkeepalive mode');
+{
+  const KEEPALIVE_SENTINEL = require(path.join(PLUGIN, 'scripts/lib/prompt.js')).KEEPALIVE_SENTINEL;
+
+  function killIfSet(s) {
+    if (s && s.timerPid) {
+      try {
+        process.kill(s.timerPid, 'SIGTERM');
+      } catch (_) {
+        /* already gone */
+      }
+    }
+  }
+
+  cli(['reset']);
+  cli(['set', 'action', 'keepalive']);
+
+  writeTranscript(50000);
+  const r1 = runScript('arm.js', {
+    session_id: 'ka-first',
+    transcript_path: TRANSCRIPT,
+    cwd: SANDBOX,
+    hook_event_name: 'Stop',
+  });
+  const s1 = sessionState('ka-first');
+  check('exits 0 arming the first keepalive ping', r1.status === 0, r1.stderr);
+  check('mode is recorded as keepalive', !!s1 && s1.mode === 'keepalive', s1 && s1.mode);
+  check('pingCount starts at 0', !!s1 && s1.pingCount === 0, s1 && String(s1.pingCount));
+  check('injects the sentinel, not /compact', !!s1 && s1.text === KEEPALIVE_SENTINEL, s1 && s1.text);
+  check('derives the keepalive cadence', !!s1 && s1.idleMinutes === 55, s1 && String(s1.idleMinutes));
+  killIfSet(s1);
+
+  // A confirmed ping: seed a "previous" record as timer.js would have left it
+  // after successfully injecting the sentinel and Claude replying, then let
+  // arm.js's own Stop handler — which fires for that reply exactly as it
+  // would for any other turn — pick it up.
+  writeTranscript(50000); // read-dominated usage: read=49990, creation=0 -> hit
+  seedState('ka-confirm', {
+    mode: 'keepalive',
+    pingCount: 3,
+    fired: { at: Date.now(), ok: true, provider: 'tmux' },
+  });
+  const r2 = runScript('arm.js', {
+    session_id: 'ka-confirm',
+    transcript_path: TRANSCRIPT,
+    cwd: SANDBOX,
+    hook_event_name: 'Stop',
+  });
+  const s2 = sessionState('ka-confirm');
+  check('a confirmed ping re-arms', r2.status === 0, r2.stderr);
+  check('pingCount carries forward incremented', !!s2 && s2.pingCount === 4, s2 && String(s2.pingCount));
+  const pingLines = fs
+    .readFileSync(path.join(SANDBOX, '.claude', 'idle-compactor', 'pings.log'), 'utf8')
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l));
+  check(
+    'records a hit for the confirmed ping',
+    pingLines.some((e) => e.sessionId === 'ka-confirm' && e.result === 'hit'),
+    JSON.stringify(pingLines)
+  );
+  killIfSet(s2);
+
+  // Reaching the cap stops the loop instead of re-arming.
+  cli(['set', 'max-pings', '5']);
+  writeTranscript(50000);
+  seedState('ka-cap', {
+    mode: 'keepalive',
+    pingCount: 4,
+    fired: { at: Date.now(), ok: true, provider: 'tmux' },
+  });
+  const r3 = runScript('arm.js', {
+    session_id: 'ka-cap',
+    transcript_path: TRANSCRIPT,
+    cwd: SANDBOX,
+    hook_event_name: 'Stop',
+  });
+  check('exhausting the cap exits 0', r3.status === 0, r3.stderr);
+  check('does not re-arm once the cap is reached', sessionState('ka-cap') === null);
+  cli(['set', 'max-pings', '12']);
+
+  // A ping whose injection failed outright does not keep the loop going —
+  // the next Stop just arms a fresh cycle instead of continuing the count.
+  writeTranscript(50000);
+  seedState('ka-failed', {
+    mode: 'keepalive',
+    pingCount: 1,
+    fired: { at: Date.now(), ok: false, attempts: [] },
+  });
+  const r4 = runScript('arm.js', {
+    session_id: 'ka-failed',
+    transcript_path: TRANSCRIPT,
+    cwd: SANDBOX,
+    hook_event_name: 'Stop',
+  });
+  const s4 = sessionState('ka-failed');
+  check('a failed ping does not carry the count forward', !!s4 && s4.pingCount === 0, s4 && String(s4.pingCount));
+  killIfSet(s4);
+
+  // disarm.js: the sentinel being submitted must not kill the loop...
+  seedState('ka-disarm-own', { mode: 'keepalive', pingCount: 1 });
+  const r5 = runScript('disarm.js', {
+    session_id: 'ka-disarm-own',
+    hook_event_name: 'UserPromptSubmit',
+    prompt: KEEPALIVE_SENTINEL,
+  });
+  check('exits 0', r5.status === 0, r5.stderr);
+  check('does not disarm its own ping', sessionState('ka-disarm-own') !== null);
+
+  // ...but real activity in keepalive mode still disarms normally.
+  seedState('ka-disarm-real', { mode: 'keepalive', pingCount: 2 });
+  const r6 = runScript('disarm.js', {
+    session_id: 'ka-disarm-real',
+    hook_event_name: 'UserPromptSubmit',
+    prompt: 'what does this function do?',
+  });
+  check('exits 0', r6.status === 0, r6.stderr);
+  check('real activity still disarms a keepalive session', sessionState('ka-disarm-real') === null);
+
+  // Sentinel-looking text alone is not enough without matching mode: defence
+  // in depth against a stray coincidental match outside keepalive mode.
+  seedState('ka-disarm-wrongmode', { mode: 'compact', pingCount: 0 });
+  const r7 = runScript('disarm.js', {
+    session_id: 'ka-disarm-wrongmode',
+    hook_event_name: 'UserPromptSubmit',
+    prompt: KEEPALIVE_SENTINEL,
+  });
+  check('exits 0', r7.status === 0, r7.stderr);
+  check(
+    'sentinel text alone does not suppress disarm outside keepalive mode',
+    sessionState('ka-disarm-wrongmode') === null
+  );
+
+  cli(['reset']);
 }
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');

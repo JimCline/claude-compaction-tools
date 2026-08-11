@@ -10,6 +10,7 @@ const fs = require('fs');
 const config = require('./lib/config');
 const inject = require('./lib/inject');
 const live = require('./lib/sessions');
+const stats = require('./lib/stats');
 
 const lines = [];
 function say(s) {
@@ -23,12 +24,13 @@ say('node:          ' + process.version + ' at ' + process.execPath);
 say('home:          ' + os.homedir());
 say('');
 say('enabled:       ' + (cfg.enabled ? 'yes' : 'no'));
+say('mode:          ' + cfg.idleAction + (cfg.idleAction === 'keepalive' ? ' (max ' + cfg.keepaliveMaxPings + ' pings)' : ''));
 say(
   'idle threshold: ' +
     cfg.idleMinutes +
     ' min ' +
     (cfg.idleMinutesIsDefault
-      ? '(' + cfg.cacheTtl + ' cache TTL minus ' + config.graceMinutesFor(cfg.cacheTtl) + ' min)'
+      ? '(' + cfg.cacheTtl + ' cache TTL minus ' + config.effectiveGraceMinutes(cfg) + ' min)'
       : '(explicit override)')
 );
 say('min context:   ' + cfg.minTokens + ' tokens');
@@ -79,6 +81,15 @@ say('helper binaries:');
 for (const bin of ['tmux', 'screen', 'wezterm', 'kitty', 'osascript', 'xdotool', 'ydotool']) {
   say('  ' + bin.padEnd(10) + (inject.have(bin) ? 'found' : '-'));
 }
+
+say('');
+const pings = stats.summarizePings();
+say(
+  'keepalive pings: ' +
+    (pings.total
+      ? pings.hits + ' hit, ' + pings.misses + ' miss (' + Math.round(pings.missRate * 100) + '% miss)'
+      : 'none recorded yet')
+);
 
 say('');
 const view = live.describe();
