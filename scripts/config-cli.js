@@ -34,7 +34,7 @@ function fail(message) {
 
 function describe(cfg) {
   const source = cfg.idleMinutesIsDefault
-    ? 'derived from the ' + cfg.cacheTtl + ' cache TTL minus ' + config.GRACE_MINUTES + ' min'
+    ? 'derived from the ' + cfg.cacheTtl + ' cache TTL minus ' + config.graceMinutesFor(cfg.cacheTtl) + ' min'
     : 'explicit override';
   return [
     'idle-compactor: ' + (cfg.enabled ? 'ON' : 'OFF'),

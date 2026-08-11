@@ -91,7 +91,7 @@ console.log('transcript token accounting');
 console.log('\ndefault threshold derivation');
 {
   const config = require(path.join(PLUGIN, 'scripts/lib/config.js'));
-  check('1h TTL -> 59 minutes', config.defaultMinutesFor('1h') === 59, String(config.defaultMinutesFor('1h')));
+  check('1h TTL -> 55 minutes', config.defaultMinutesFor('1h') === 55, String(config.defaultMinutesFor('1h')));
   check('5m TTL -> 4 minutes', config.defaultMinutesFor('5m') === 4, String(config.defaultMinutesFor('5m')));
 }
 
@@ -152,8 +152,8 @@ console.log('\narm gating');
   check('writes session state', !!s);
   check('records a timer pid', !!(s && s.timerPid), s && String(s.timerPid));
   check('records an armId', !!(s && s.armId));
-  check('defaults to a 59 minute window', !!s && s.idleMinutes === 59, s && String(s.idleMinutes));
-  check('fireAt is armedAt + 59 min', !!s && s.fireAt - s.armedAt === 59 * 60 * 1000);
+  check('defaults to a 55 minute window', !!s && s.idleMinutes === 55, s && String(s.idleMinutes));
+  check('fireAt is armedAt + 55 min', !!s && s.fireAt - s.armedAt === 55 * 60 * 1000);
   check('records the absolute node path', !!s && s.nodePath === process.execPath);
   check('injects /compact', !!s && s.text === '/compact');
 }
@@ -210,7 +210,7 @@ function seedState(id, overrides) {
       contextTokens: 50000,
       armedAt: now - 2000,
       fireAt: now - 1000,
-      idleMinutes: 59,
+      idleMinutes: 55,
       cacheTtl: '1h',
       allowBlindInjection: false,
       text: '/compact',
@@ -353,9 +353,9 @@ function cli(argv) {
   check('off disables', /idle-compactor: OFF/.test(cli(['off']).stdout));
   check('on enables', /idle-compactor: ON/.test(cli(['on']).stdout));
   check('ttl 5m -> 4 minutes', /idle threshold: 4 min/.test(cli(['set', 'ttl', '5m']).stdout));
-  check('ttl 1h -> 59 minutes', /idle threshold: 59 min/.test(cli(['set', 'ttl', '1h']).stdout));
+  check('ttl 1h -> 55 minutes', /idle threshold: 55 min/.test(cli(['set', 'ttl', '1h']).stdout));
   check('minutes 25 overrides', /idle threshold: 25 min \(explicit override\)/.test(cli(['set', 'minutes', '25']).stdout));
-  check('ttl clears the override', /idle threshold: 59 min \(derived/.test(cli(['set', 'ttl', '1h']).stdout));
+  check('ttl clears the override', /idle threshold: 55 min \(derived/.test(cli(['set', 'ttl', '1h']).stdout));
   check('rejects a bad ttl', cli(['set', 'ttl', '2h']).status === 1);
   check('rejects non-numeric minutes', cli(['set', 'minutes', 'abc']).status === 1);
   check('rejects an unknown command', cli(['wat']).status === 1);
@@ -374,7 +374,7 @@ function cli(argv) {
   check('test dry run exits 0', cli(['test']).status === 0);
   check('paths reports an absolute node binary', /node: \//.test(cli(['paths']).stdout), cli(['paths']).stdout);
   check('setup-done records the flag', /setup recorded/.test(cli(['setup-done']).stdout));
-  check('reset restores defaults', /idle threshold: 59 min/.test(cli(['reset']).stdout));
+  check('reset restores defaults', /idle threshold: 55 min/.test(cli(['reset']).stdout));
 }
 
 // ---------------------------------------------------------------------------
@@ -464,8 +464,8 @@ console.log('\nsession-start hook');
   }
   check('emits a first-run systemMessage', !!(payload && payload.systemMessage), r.stdout.slice(0, 200));
   check(
-    'systemMessage names the 59 minute default',
-    !!(payload && /59 minutes/.test(payload.systemMessage)),
+    'systemMessage names the 55 minute default',
+    !!(payload && /55 minutes/.test(payload.systemMessage)),
     payload && payload.systemMessage
   );
   const ctx = payload && payload.hookSpecificOutput && payload.hookSpecificOutput.additionalContext;

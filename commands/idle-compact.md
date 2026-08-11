@@ -98,7 +98,7 @@ plugin):
 2. Ask both of these in a **single AskUserQuestion call**.
 
    Question 1 — header **Idle wait**, how long a session may sit idle:
-   - **59 minutes (recommended)** — the 1-hour cache TTL minus 1 minute.
+   - **55 minutes (recommended)** — the 1-hour cache TTL minus 5 minutes.
    - **4 minutes** — the 5-minute default cache TTL minus 1 minute.
    - **Custom** — any number of minutes they name.
    - **Disable for now** — leave it off.

@@ -21,13 +21,13 @@ Anthropic's prompt cache has exactly two TTLs: **5 minutes** (the default
 session's cached prefix is alive, re-sending it costs about 0.1× base input.
 Once it expires, the next turn pays a full cache write at 1.25× (5m) or 2× (1h).
 
-So the useful moment to compact is *one minute before the cache dies*:
+So the useful moment to compact is a few minutes before the cache dies:
 
 - Late enough that a user who comes straight back still lands on a warm cache.
 - Early enough that the compaction request itself reads the warm prefix instead
   of paying to re-write the whole thing.
 
-That is the default: **59 minutes** for the 1-hour TTL, **4 minutes** for the
+That is the default: **55 minutes** for the 1-hour TTL, **4 minutes** for the
 5-minute TTL. You are asked which one you want the first time the plugin runs.
 
 ## How it works — and the honest caveat
@@ -84,7 +84,7 @@ setup` any time to change your mind.
 /idle-compact                 show current settings and armed timers
 /idle-compact on              enable
 /idle-compact off             disable and cancel every pending timer
-/idle-compact 1h              use the 1-hour cache TTL  → 59 minutes
+/idle-compact 1h              use the 1-hour cache TTL  → 55 minutes
 /idle-compact 5m              use the 5-minute cache TTL →  4 minutes
 /idle-compact 25              use an explicit 25-minute threshold
 /idle-compact min-tokens 40000   only compact above this context size

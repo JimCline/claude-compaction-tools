@@ -37,7 +37,7 @@ function setupContext(cfg) {
     '',
     '   Question 1, header "Idle wait" — how long a session may sit idle before',
     '   it is compacted:',
-    '   - "' + config.defaultMinutesFor('1h') + ' minutes (recommended)" — matches the 1-hour cache TTL minus 1 minute.',
+    '   - "' + config.defaultMinutesFor('1h') + ' minutes (recommended)" — matches the 1-hour cache TTL minus 5 minutes.',
     '   - "' + config.defaultMinutesFor('5m') + ' minutes" — matches the 5-minute default cache TTL minus 1 minute.',
     '   - "Custom" — any number of minutes they name.',
     '   - "Disable for now" — leave it off.',
@@ -86,7 +86,7 @@ async function main() {
     systemMessage:
       'idle-compactor is installed but not configured. Default idle threshold is ' +
       config.defaultMinutesFor(config.DEFAULT_TTL) +
-      ' minutes (1h prompt-cache TTL minus 1 minute). Run /idle-compact setup to change it.',
+      ' minutes (1h prompt-cache TTL minus 5 minutes). Run /idle-compact setup to change it.',
     hookSpecificOutput: {
       hookEventName: 'SessionStart',
       additionalContext: setupContext(cfg),

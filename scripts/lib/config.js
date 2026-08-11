@@ -4,12 +4,14 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-// The two Anthropic prompt-cache TTLs. Compaction is scheduled one minute
-// before the cached prefix expires: late enough that a user who comes back
-// still lands on a warm cache, early enough that the compaction request
-// itself still reads the warm prefix instead of paying a full re-write.
+// The two Anthropic prompt-cache TTLs. Compaction is scheduled a grace
+// period before the cached prefix expires: late enough that a user who comes
+// back still lands on a warm cache, early enough that the compaction request
+// itself still reads the warm prefix instead of paying a full re-write. The
+// grace is wider on the 1h TTL because a long agentic turn can burn several
+// minutes of the window before the idle timer is even armed.
 const TTL_MINUTES = { '5m': 5, '1h': 60 };
-const GRACE_MINUTES = 1;
+const GRACE_MINUTES = { '5m': 1, '1h': 5 };
 const DEFAULT_TTL = '1h';
 
 const ROOT = path.join(os.homedir(), '.claude', 'idle-compactor');
@@ -32,9 +34,14 @@ function ensureRoot() {
   return ROOT;
 }
 
+function graceMinutesFor(ttl) {
+  const key = Object.prototype.hasOwnProperty.call(GRACE_MINUTES, ttl) ? ttl : DEFAULT_TTL;
+  return GRACE_MINUTES[key];
+}
+
 function defaultMinutesFor(ttl) {
-  const total = TTL_MINUTES[ttl] || TTL_MINUTES[DEFAULT_TTL];
-  return Math.max(1, total - GRACE_MINUTES);
+  const key = Object.prototype.hasOwnProperty.call(TTL_MINUTES, ttl) ? ttl : DEFAULT_TTL;
+  return Math.max(1, TTL_MINUTES[key] - graceMinutesFor(key));
 }
 
 function read() {
@@ -119,6 +126,7 @@ module.exports = {
   SESSION_DIR,
   ensureRoot,
   defaultMinutesFor,
+  graceMinutesFor,
   read,
   write,
   setPromptPath,

@@ -28,7 +28,7 @@ say(
     cfg.idleMinutes +
     ' min ' +
     (cfg.idleMinutesIsDefault
-      ? '(' + cfg.cacheTtl + ' cache TTL minus ' + config.GRACE_MINUTES + ' min)'
+      ? '(' + cfg.cacheTtl + ' cache TTL minus ' + config.graceMinutesFor(cfg.cacheTtl) + ' min)'
       : '(explicit override)')
 );
 say('min context:   ' + cfg.minTokens + ' tokens');
