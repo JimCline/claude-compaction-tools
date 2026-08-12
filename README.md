@@ -112,6 +112,7 @@ setup` any time to change your mind.
 
 | Terminal | Method | Targeted? | Notes |
 |---|---|---|---|
+| herdr | `herdr pane run $HERDR_PANE_ID` | yes | |
 | tmux | `send-keys -t $TMUX_PANE` | yes | |
 | GNU screen | `-X stuff` | yes | |
 | WezTerm | `wezterm cli send-text --pane-id` | yes | |
@@ -121,7 +122,8 @@ setup` any time to change your mind.
 | X11 | `xdotool --window $WINDOWID` | yes | only when `WINDOWID` is set |
 | X11 | `xdotool` to the active window | **no** | opt-in |
 | Wayland | `ydotool` | **no** | opt-in, needs `ydotoold` |
-| Windows | PowerShell `AppActivate` + `SendKeys` | **no** | opt-in |
+| Windows | `WriteConsoleInput` on the session's own console | yes | Windows Terminal, conhost, VS Code |
+| Windows | PowerShell `AppActivate` + `SendKeys` | **no** | opt-in, fallback |
 
 Providers are tried in that order and the first one that succeeds wins. If your
 terminal is not listed and you are not in tmux, the plugin will detect nothing
@@ -129,6 +131,12 @@ and stay dormant — running Claude Code inside tmux is the most portable fix.
 
 macOS will ask for Automation permission the first time the AppleScript
 providers run.
+
+On Windows the first provider attaches to the console that Claude Code itself
+is running on and writes the keystrokes into that console's input buffer. It
+therefore does not care which window has focus, and it targets the right tab
+even when Windows Terminal has a dozen of them. `SendKeys` remains behind it as
+an opt-in fallback for hosts where attaching fails.
 
 ### Blind injection
 
@@ -140,7 +148,8 @@ into that other application instead. They are therefore **off by default**:
 /idle-compact blind on
 ```
 
-Only enable this if you understand that trade-off.
+Only enable this if you understand that trade-off. Windows normally never gets
+that far, because console injection is tried first and does not depend on focus.
 
 ## Compaction prompt
 

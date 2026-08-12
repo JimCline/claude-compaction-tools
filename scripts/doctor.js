@@ -6,6 +6,7 @@
 
 const os = require('os');
 const fs = require('fs');
+const path = require('path');
 
 const config = require('./lib/config');
 const inject = require('./lib/inject');
@@ -39,6 +40,18 @@ say('setup done:    ' + (cfg.setupCompleted ? 'yes' : 'no'));
 say('config file:   ' + config.CONFIG_PATH + (fs.existsSync(config.CONFIG_PATH) ? '' : ' (absent)'));
 say('state dir:     ' + config.SESSION_DIR);
 
+const runningRoot = path.resolve(__dirname, '..');
+say('running from:  ' + runningRoot);
+if (cfg.pluginRoot && cfg.pluginRoot !== runningRoot) {
+  const stale = !fs.existsSync(path.join(cfg.pluginRoot, 'scripts', 'config-cli.js'));
+  say(
+    'recorded root: ' +
+      cfg.pluginRoot +
+      (cfg.pluginVersion ? ' (v' + cfg.pluginVersion + ')' : ' (version not recorded)') +
+      (stale ? '  — GONE, the running copy will be used instead' : '  — /idle-compact runs this one')
+  );
+}
+
 say('');
 say('terminal environment:');
 const env = inject.captureEnv();
@@ -60,8 +73,9 @@ const ctx = inject.makeContext({ env, tty, text: '/compact' });
 const found = inject.detect(ctx);
 if (!found.length) {
   say('  NONE — no way to type into this terminal was detected.');
-  say('  Supported: tmux, GNU screen, WezTerm, kitty (remote control on),');
-  say('  iTerm2, Apple Terminal, xdotool (X11), ydotool (Wayland), Windows SendKeys.');
+  say('  Supported: herdr, tmux, GNU screen, WezTerm, kitty (remote control on),');
+  say('  iTerm2, Apple Terminal, xdotool (X11), ydotool (Wayland),');
+  say('  Windows console injection, Windows SendKeys.');
 } else {
   for (const p of found) {
     const usable = !p.blind || cfg.allowBlindInjection;
@@ -78,7 +92,7 @@ if (!found.length) {
 
 say('');
 say('helper binaries:');
-for (const bin of ['tmux', 'screen', 'wezterm', 'kitty', 'osascript', 'xdotool', 'ydotool']) {
+for (const bin of ['herdr', 'tmux', 'screen', 'wezterm', 'kitty', 'osascript', 'xdotool', 'ydotool']) {
   say('  ' + bin.padEnd(10) + (inject.have(bin) ? 'found' : '-'));
 }
 

@@ -1337,6 +1337,167 @@ console.log('\ntoken savings tracking');
   cli(['stats', 'reset']);
 }
 
+// ---------------------------------------------------------------------------
+console.log('\nrecorded plugin root');
+{
+  const CONFIG = path.join(SANDBOX, '.claude', 'idle-compactor', 'config.json');
+  const readCfg = () => JSON.parse(fs.readFileSync(CONFIG, 'utf8'));
+  const patchCfg = (patch) =>
+    fs.writeFileSync(CONFIG, JSON.stringify(Object.assign(readCfg(), patch), null, 2));
+
+  // A second copy of the plugin standing in for a superseded install-cache
+  // version: enough of a tree that the usable() check passes.
+  const oldCopy = path.join(SANDBOX, 'plugin-0.1.0');
+  fs.mkdirSync(path.join(oldCopy, 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(oldCopy, '.claude-plugin'), { recursive: true });
+  fs.writeFileSync(path.join(oldCopy, 'scripts', 'config-cli.js'), '');
+  fs.writeFileSync(
+    path.join(oldCopy, '.claude-plugin', 'plugin.json'),
+    JSON.stringify({ name: 'idle-compactor', version: '0.1.0' })
+  );
+
+  runScript('session-start.js', { session_id: 'root-probe', source: 'startup' });
+  check('session start records the running root', readCfg().pluginRoot === PLUGIN, readCfg().pluginRoot);
+  check('session start records the running version', /^\d+\.\d+\.\d+$/.test(readCfg().pluginVersion || ''), readCfg().pluginVersion);
+
+  patchCfg({ pluginRoot: oldCopy, pluginVersion: '0.1.0' });
+  runScript('session-start.js', { session_id: 'root-probe', source: 'startup' });
+  check('a newer copy reclaims a root recorded by an older one', readCfg().pluginRoot === PLUGIN, readCfg().pluginRoot);
+
+  const newerCopy = path.join(SANDBOX, 'plugin-99.0.0');
+  fs.mkdirSync(path.join(newerCopy, 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(newerCopy, '.claude-plugin'), { recursive: true });
+  fs.writeFileSync(path.join(newerCopy, 'scripts', 'config-cli.js'), '');
+  fs.writeFileSync(
+    path.join(newerCopy, '.claude-plugin', 'plugin.json'),
+    JSON.stringify({ name: 'idle-compactor', version: '99.0.0' })
+  );
+  patchCfg({ pluginRoot: newerCopy, pluginVersion: '99.0.0' });
+  runScript('session-start.js', { session_id: 'root-probe', source: 'startup' });
+  check(
+    'an older copy cannot overwrite a newer recorded root',
+    readCfg().pluginRoot === newerCopy,
+    readCfg().pluginRoot
+  );
+
+  // The pre-fix configs in the wild have a root but no version at all.
+  patchCfg({ pluginRoot: oldCopy, pluginVersion: undefined });
+  runScript('session-start.js', { session_id: 'root-probe', source: 'startup' });
+  check(
+    'a root recorded without a version is repaired',
+    readCfg().pluginRoot === PLUGIN,
+    readCfg().pluginRoot
+  );
+
+  patchCfg({ pluginRoot: path.join(SANDBOX, 'deleted-copy'), pluginVersion: '99.0.0' });
+  runScript('session-start.js', { session_id: 'root-probe', source: 'startup' });
+  check(
+    'a recorded root that no longer exists is reclaimed',
+    readCfg().pluginRoot === PLUGIN,
+    readCfg().pluginRoot
+  );
+
+  patchCfg({ pluginRoot: path.join(SANDBOX, 'deleted-copy') });
+  const paths = cli(['paths']).stdout;
+  check('paths falls back to the running copy when the recorded root is gone', paths.includes('root: ' + PLUGIN), paths);
+
+  patchCfg({ pluginRoot: newerCopy, pluginVersion: '99.0.0' });
+  check('paths honours a recorded root that still exists', cli(['paths']).stdout.includes('root: ' + newerCopy));
+
+  runScript('session-start.js', { session_id: 'root-probe', source: 'startup' });
+}
+
+// ---------------------------------------------------------------------------
+console.log('\ninjection providers');
+{
+  const inject = require(path.join(PLUGIN, 'scripts', 'lib', 'inject.js'));
+
+  check(
+    'herdr pane id is captured from the environment',
+    inject.captureEnv({ HERDR_PANE_ID: 'p7', HERDR_SOCKET_PATH: '/s.sock' }).HERDR_PANE_ID === 'p7'
+  );
+  check(
+    'no herdr pane id means no herdr provider',
+    !inject.detect(inject.makeContext({ env: {} })).some((p) => p.name === 'herdr')
+  );
+
+  // The Windows providers cannot be exercised here, but they must not leak
+  // into the candidate list on the platforms that can run this suite.
+  if (process.platform !== 'win32') {
+    const elsewhere = inject.detect(inject.makeContext({ env: {}, terminalPid: 1234 }));
+    check(
+      'windows providers stay off non-windows platforms',
+      !elsewhere.some((p) => p.name === 'windows-console' || p.name === 'windows-sendkeys')
+    );
+
+    // A stub binary stands in for herdr so the exact argv can be asserted.
+    const stub = (name, body) => {
+      const file = path.join(SANDBOX, name);
+      fs.writeFileSync(file, '#!/bin/sh\n' + body);
+      fs.chmodSync(file, 0o755);
+      return file;
+    };
+    const argvLog = path.join(SANDBOX, 'herdr-argv.txt');
+    const bin = stub(
+      'fake-herdr',
+      'printf "%s " "$@" >> ' + JSON.stringify(argvLog) + '\nprintf "\\n" >> ' +
+        JSON.stringify(argvLog) + '\nexit 0\n'
+    );
+
+    const ctx = inject.makeContext({
+      env: { HERDR_PANE_ID: 'w1:t2:p3', HERDR_BIN_PATH: bin },
+      text: '/compact keep the plan',
+    });
+    const found = inject.detect(ctx);
+    const herdr = found.find((p) => p.name === 'herdr');
+    check('herdr is detected from HERDR_PANE_ID plus HERDR_BIN_PATH', !!herdr);
+    check('herdr is targeted, not blind', !!herdr && herdr.blind === false);
+    check('herdr is tried ahead of every other provider', !!found[0] && found[0].name === 'herdr');
+
+    const sent = herdr.send();
+    const argv = fs.readFileSync(argvLog, 'utf8').trim();
+    check(
+      'herdr submits through `pane run <id> <text>`',
+      sent.ok && argv === 'pane run w1:t2:p3 /compact keep the plan',
+      JSON.stringify(argv)
+    );
+
+    const fallbackLog = path.join(SANDBOX, 'herdr-fallback.txt');
+    const flaky = stub(
+      'fake-herdr-flaky',
+      'printf "%s " "$@" >> ' + JSON.stringify(fallbackLog) + '\nprintf "\\n" >> ' +
+        JSON.stringify(fallbackLog) + '\nif [ "$2" = "run" ]; then exit 3; fi\nexit 0\n'
+    );
+    const flakyCtx = inject.makeContext({
+      env: { HERDR_PANE_ID: 'p9', HERDR_BIN_PATH: flaky },
+      text: '/compact',
+    });
+    const flakyRes = inject.detect(flakyCtx).find((p) => p.name === 'herdr').send();
+    const steps = fs
+      .readFileSync(fallbackLog, 'utf8')
+      .trim()
+      .split('\n')
+      .map((s) => s.trim());
+    check(
+      'herdr falls back to send-text then send-keys when `pane run` fails',
+      flakyRes.ok &&
+        steps.length === 3 &&
+        steps[0] === 'pane run p9 /compact' &&
+        steps[1] === 'pane send-text p9 /compact' &&
+        steps[2] === 'pane send-keys p9 enter',
+      JSON.stringify(steps)
+    );
+
+    const missing = inject.makeContext({
+      env: { HERDR_PANE_ID: 'p1', HERDR_BIN_PATH: path.join(SANDBOX, 'no-such-herdr') },
+    });
+    check(
+      'a bad HERDR_BIN_PATH falls through to the PATH lookup',
+      !inject.detect(missing).some((p) => p.name === 'herdr') || inject.have('herdr')
+    );
+  }
+}
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 fs.rmSync(SANDBOX, { recursive: true, force: true });
 process.exit(fail ? 1 : 0);
