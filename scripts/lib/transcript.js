@@ -38,7 +38,11 @@ function readTailLines(file, maxBytes) {
   }
 }
 
-function lastUsage(file) {
+// The newest non-sidechain entry carrying a usage block, plus the identity of
+// the request that produced it. Sidechain entries are subagent traffic written
+// into the same file; taking their usage would report a subagent's context and
+// a subagent's model as if they were the session's own.
+function lastAssistantInfo(file) {
   const lines = readTailLines(file);
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim();
@@ -49,22 +53,34 @@ function lastUsage(file) {
     } catch (_) {
       continue;
     }
+    if (entry && entry.isSidechain === true) continue;
     const usage = entry && entry.message && entry.message.usage;
-    if (usage && typeof usage === 'object') return usage;
+    if (!usage || typeof usage !== 'object') continue;
+    return {
+      usage,
+      model: entry.message.model || null,
+      // Absent on transcripts written by older Claude Code builds, and not
+      // backfillable; every consumer must tolerate null.
+      effort: entry.effort || null,
+      tokens:
+        (usage.input_tokens || 0) +
+        (usage.cache_creation_input_tokens || 0) +
+        (usage.cache_read_input_tokens || 0),
+    };
   }
   return null;
+}
+
+function lastUsage(file) {
+  const info = lastAssistantInfo(file);
+  return info ? info.usage : null;
 }
 
 // The full prompt size for the next request, per the Anthropic usage contract:
 // input_tokens + cache_creation_input_tokens + cache_read_input_tokens.
 function contextTokens(file) {
-  const u = lastUsage(file);
-  if (!u) return null;
-  return (
-    (u.input_tokens || 0) +
-    (u.cache_creation_input_tokens || 0) +
-    (u.cache_read_input_tokens || 0)
-  );
+  const info = lastAssistantInfo(file);
+  return info ? info.tokens : null;
 }
 
 // Claude Code writes several kinds of entry under type "user" that the human
@@ -122,4 +138,4 @@ function mtimeMs(file) {
   }
 }
 
-module.exports = { lastUsage, contextTokens, lastUserTurnMs, mtimeMs };
+module.exports = { lastAssistantInfo, lastUsage, contextTokens, lastUserTurnMs, mtimeMs };

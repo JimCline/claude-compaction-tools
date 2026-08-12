@@ -173,6 +173,7 @@ function statsCommand() {
 
   if (sub === 'reset') {
     stats.reset();
+    stats.resetPings();
     return out('compaction stats cleared', { ok: true });
   }
   if (sub === 'sessions') {
@@ -227,6 +228,55 @@ function statsCommand() {
     lines.push('no recorded fires yet');
   }
 
+  const savings = stats.summarizeSavings();
+  lines.push('');
+  if (savings.events === 0 && savings.emptyChains === 0) {
+    lines.push('no token-savings events recorded yet');
+  } else {
+    lines.push(
+      'idle events:      ' +
+        savings.events +
+        '  (' +
+        savings.compactions +
+        ' compactions, ' +
+        savings.keepaliveChains +
+        ' keepalive chains)'
+    );
+    let tokensLine = 'tokens protected: ' + savings.tokensProtected;
+    if (savings.eventsMissingTokens > 0) {
+      tokensLine += '  (' + savings.eventsMissingTokens + ' chains had no recorded token count)';
+    }
+    lines.push(tokensLine);
+    if (savings.pingHits + savings.pingMisses > 0) {
+      lines.push('keepalive pings:   ' + savings.pingHits + ' hits, ' + savings.pingMisses + ' misses');
+    }
+    if (savings.emptyChains > 0) {
+      lines.push('  (' + savings.emptyChains + ' keepalive chains protected nothing)');
+    }
+    if (savings.tokensRewritten > 0) {
+      lines.push('  (' + savings.tokensRewritten + ' tokens rewritten by missed pings)');
+    }
+    const models = Object.keys(savings.byModel).sort(
+      (a, b) => savings.byModel[b].tokens - savings.byModel[a].tokens
+    );
+    if (models.length) {
+      lines.push('');
+      lines.push('by model:');
+      for (const m of models) {
+        const row = savings.byModel[m];
+        lines.push(
+          '  ' +
+            m.padEnd(18) +
+            ' ' +
+            String(row.events).padStart(3) +
+            ' events   ' +
+            String(row.tokens).padStart(9) +
+            ' tokens'
+        );
+      }
+    }
+  }
+
   const view = live.describe();
   lines.push('');
   lines.push(live.render(view));
@@ -234,9 +284,74 @@ function statsCommand() {
   return out(lines.join('\n'), {
     ok: true,
     stats: summary,
+    savings,
     counts: view.counts,
     sessions: view.sessions,
   });
+}
+
+function formatChainEvent(g) {
+  const at = new Date(g.lastAt).toISOString();
+  const kind = (g.kind === 'compact' ? 'compact' : 'keepalive').padEnd(9);
+  const sid = (g.sessionId || '').slice(0, 8).padEnd(8);
+  const model = String(g.model || '(unknown)').padEnd(18);
+  const effort = String(g.effort || '-').padEnd(6);
+  const tokens = String(g.tokens != null ? g.tokens : '-').padStart(9);
+  let line = at + '  ' + kind + '  ' + sid + '  ' + model + '  ' + effort + '  ' + tokens;
+  if (g.pings > 1) line += '  x' + g.pings;
+  return line;
+}
+
+function formatRawRow(row, source) {
+  const at = new Date(row.at || 0).toISOString();
+  const label =
+    source === 'pings'
+      ? ('ping-' + (row.result || '?')).padEnd(9)
+      : (row.ok
+          ? row.mode || 'compact'
+          : row.reason === 'activity-detected'
+          ? 'skipped'
+          : 'failed'
+        ).padEnd(9);
+  const sid = (row.sessionId || '').slice(0, 8).padEnd(8);
+  const model = String(row.model || '(unknown)').padEnd(18);
+  const effort = String(row.effort || '-').padEnd(6);
+  const tokens = String(row.tokens != null ? row.tokens : '-').padStart(9);
+  return at + '  ' + label + '  ' + sid + '  ' + model + '  ' + effort + '  ' + tokens;
+}
+
+function logCommand() {
+  const showAll = (args[1] || '').toLowerCase() === 'all';
+  const countArg = showAll ? args[2] : args[1];
+  let n = 10;
+  if (countArg !== undefined) {
+    n = Number(countArg);
+    if (!Number.isInteger(n) || n < 1 || n > 200) {
+      return fail('log count must be an integer between 1 and 200');
+    }
+  }
+
+  if (showAll) {
+    const tagged = stats
+      .readAll()
+      .map((r) => ({ row: r, source: 'fires' }))
+      .concat(stats.readPings().map((r) => ({ row: r, source: 'pings' })));
+    tagged.sort((a, b) => (b.row.at || 0) - (a.row.at || 0));
+    const top = tagged.slice(0, n);
+    if (!top.length) return out('no idle compaction events recorded yet', { ok: true, events: [] });
+    return out(
+      top.map((t) => formatRawRow(t.row, t.source)).join('\n'),
+      { ok: true, events: top.map((t) => t.row) }
+    );
+  }
+
+  const events = stats
+    .readSavings()
+    .slice()
+    .sort((a, b) => b.lastAt - a.lastAt)
+    .slice(0, n);
+  if (!events.length) return out('no idle compaction events recorded yet', { ok: true, events: [] });
+  return out(events.map(formatChainEvent).join('\n'), { ok: true, events });
 }
 
 function main() {
@@ -344,6 +459,9 @@ function main() {
 
     case 'stats':
       return statsCommand();
+
+    case 'log':
+      return logCommand();
 
     case 'test':
       return testInjection();

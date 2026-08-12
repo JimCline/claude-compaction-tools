@@ -38,10 +38,32 @@ async function main() {
   if (previous && previous.mode === 'keepalive' && previous.fired && previous.fired.ok) {
     const usage = transcriptPath ? transcript.lastUsage(transcriptPath) : null;
     const verdict = stats.classifyPingUsage(usage);
-    if (verdict) stats.recordPing(sessionId, verdict);
+    // The chain the *ping* belonged to is the record that fired it, not the
+    // record about to be armed next; previous.armId is the pre-chainId
+    // fallback for state written before this field existed.
+    const chainOfPing = previous.chainId || previous.armId;
+    if (verdict) {
+      stats.recordPing(sessionId, verdict, {
+        chainId: chainOfPing,
+        model: previous.model,
+        effort: previous.effort,
+        usage,
+        previousContextTokens: previous.contextTokens,
+      });
+    }
     pingCount = (previous.pingCount || 0) + 1;
     if (cfg.idleAction === 'keepalive' && pingCount >= cfg.keepaliveMaxPings) {
-      stats.record(sessionId, { ok: true, reason: 'keepalive-exhausted', detail: 'pings:' + pingCount });
+      stats.record(
+        sessionId,
+        { ok: true, reason: 'keepalive-exhausted', detail: 'pings:' + pingCount },
+        {
+          mode: previous.mode,
+          chainId: chainOfPing,
+          tokens: previous.contextTokens,
+          model: previous.model,
+          effort: previous.effort,
+        }
+      );
       state.remove(sessionId);
       return;
     }
@@ -52,7 +74,8 @@ async function main() {
     return;
   }
 
-  const tokens = transcriptPath ? transcript.contextTokens(transcriptPath) : null;
+  const info = transcriptPath ? transcript.lastAssistantInfo(transcriptPath) : null;
+  const tokens = info ? info.tokens : null;
 
   // Compacting a small context throws away a cheap cache for nothing.
   if (tokens !== null && tokens < cfg.minTokens) {
@@ -67,6 +90,17 @@ async function main() {
   // visible in the state file, and so a prompt file edited mid-idle cannot
   // change what this armed timer sends.
   const text = cfg.idleAction === 'keepalive' ? prompt.keepaliveCommand() : prompt.compactCommand(cwd, cfg);
+  // A keepalive chain is one continuous idle stretch: it survives re-arming on
+  // each confirmed ping, and ends whenever pingCount would reset. Grouping the
+  // per-ping rows by this id at read time is what turns a chain into a single
+  // savings event, without needing to catch every way a chain can end.
+  const continuesChain =
+    previous &&
+    previous.mode === 'keepalive' &&
+    previous.fired &&
+    previous.fired.ok &&
+    cfg.idleAction === 'keepalive';
+  const chainId = continuesChain ? previous.chainId || previous.armId : armId;
   const record = {
     version: 1,
     armId,
@@ -74,6 +108,9 @@ async function main() {
     cwd,
     transcriptPath: transcriptPath || null,
     contextTokens: tokens,
+    model: info ? info.model : null,
+    effort: info ? info.effort : null,
+    chainId,
     armedAt,
     fireAt: armedAt + cfg.idleMinutes * 60 * 1000,
     idleMinutes: cfg.idleMinutes,

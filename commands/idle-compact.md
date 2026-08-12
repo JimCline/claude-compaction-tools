@@ -40,6 +40,9 @@ Map the arguments to exactly one Bash command:
 | `stats` | `CLI stats` |
 | `stats sessions` | `CLI stats sessions` |
 | `stats reset` | `CLI stats reset` |
+| `log` | `CLI log` |
+| `log <number>` | `CLI log <number>` |
+| `log all` | `CLI log all` |
 | `doctor` | `DOCTOR` |
 | `reset` | `CLI reset` |
 | `setup` | Run the setup conversation described below |

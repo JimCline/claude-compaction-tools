@@ -40,7 +40,13 @@ function finish(record, outcome) {
     /* the state file is a diagnostic, not a correctness requirement */
   }
   try {
-    stats.record(record.sessionId, record.fired);
+    stats.record(record.sessionId, record.fired, {
+      mode: record.mode,
+      chainId: record.chainId,
+      tokens: record.contextTokens,
+      model: record.model,
+      effort: record.effort,
+    });
   } catch (_) {
     /* the fire log is a diagnostic, not a correctness requirement */
   }

@@ -44,20 +44,37 @@ function writeTranscript(tokens, opts) {
   if (!o.omitUserTimestamp) {
     user.timestamp = new Date(o.userTimestamp || Date.now()).toISOString();
   }
-  const lines = [
-    JSON.stringify(user),
-    JSON.stringify({
-      type: 'assistant',
-      message: {
-        role: 'assistant',
-        usage: {
-          input_tokens: 10,
-          cache_creation_input_tokens: 0,
-          cache_read_input_tokens: Math.max(0, tokens - 10),
-        },
+  const assistant = {
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      usage: {
+        input_tokens: 10,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: Math.max(0, tokens - 10),
       },
-    }),
-  ];
+    },
+  };
+  if (o.model) assistant.message.model = o.model;
+  if (o.effort) assistant.effort = o.effort;
+  const lines = [JSON.stringify(user), JSON.stringify(assistant)];
+  if (o.sidechain) {
+    lines.push(
+      JSON.stringify({
+        type: 'assistant',
+        isSidechain: true,
+        message: {
+          role: 'assistant',
+          model: 'sidechain-model',
+          usage: {
+            input_tokens: 5,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 5,
+          },
+        },
+      })
+    );
+  }
   for (const extra of o.extraLines || []) lines.push(JSON.stringify(extra));
   fs.writeFileSync(TRANSCRIPT, lines.join('\n') + '\n');
 }
@@ -839,6 +856,485 @@ console.log('\nkeepalive mode');
   );
 
   cli(['reset']);
+}
+
+// ---------------------------------------------------------------------------
+console.log('\ntoken savings tracking');
+{
+  const transcript = require(path.join(PLUGIN, 'scripts/lib/transcript.js'));
+
+  const FIRES_LOG = path.join(SANDBOX, '.claude', 'idle-compactor', 'fires.log');
+  const PINGS_LOG = path.join(SANDBOX, '.claude', 'idle-compactor', 'pings.log');
+
+  function killTimer(pid) {
+    if (!pid) return;
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch (_) {
+      /* already gone */
+    }
+  }
+
+  // Simulates what timer.js leaves behind after successfully injecting a
+  // keepalive ping, without going through the real detached-timer/inject
+  // machinery, so a chain can be advanced deterministically in-test.
+  function markFired(sessionId, outcome) {
+    const p = statePath(sessionId);
+    const record = JSON.parse(fs.readFileSync(p, 'utf8'));
+    record.fired = Object.assign({ at: Date.now() }, outcome);
+    fs.writeFileSync(p, JSON.stringify(record, null, 2) + '\n');
+    return record;
+  }
+
+  function readRawLog(p) {
+    try {
+      return fs
+        .readFileSync(p, 'utf8')
+        .split('\n')
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l));
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function appendFireRow(obj) {
+    fs.mkdirSync(path.dirname(FIRES_LOG), { recursive: true });
+    fs.appendFileSync(FIRES_LOG, JSON.stringify(obj) + '\n');
+  }
+
+  function appendPingRow(obj) {
+    fs.mkdirSync(path.dirname(PINGS_LOG), { recursive: true });
+    fs.appendFileSync(PINGS_LOG, JSON.stringify(obj) + '\n');
+  }
+
+  // Runs code against the real stats.js module inside a freshly spawned,
+  // HOME-sandboxed process (mirroring cli()/runScript()) so tests that call
+  // stats.record()/recordPing() directly never touch the real
+  // ~/.claude/idle-compactor. `code` must write its result to stdout via
+  // process.stdout.write(JSON.stringify(...)).
+  function statsCall(code) {
+    const script = 'const stats = require(' + JSON.stringify(path.join(PLUGIN, 'scripts/lib/stats.js')) + ');\n' + code;
+    const r = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: env(), timeout: 20000 });
+    if (r.status !== 0) return { __error: r.stderr };
+    try {
+      return JSON.parse(r.stdout);
+    } catch (_) {
+      return { __error: 'unparseable stdout: ' + r.stdout };
+    }
+  }
+
+  // Case 1: sidechain entries must not poison lastAssistantInfo/contextTokens.
+  writeTranscript(50000, { model: 'claude-sonnet-5', sidechain: true });
+  check(
+    'contextTokens ignores a trailing sidechain entry',
+    transcript.contextTokens(TRANSCRIPT) === 50000,
+    String(transcript.contextTokens(TRANSCRIPT))
+  );
+  check(
+    'lastAssistantInfo().model ignores a trailing sidechain entry',
+    transcript.lastAssistantInfo(TRANSCRIPT) &&
+      transcript.lastAssistantInfo(TRANSCRIPT).model === 'claude-sonnet-5',
+    JSON.stringify(transcript.lastAssistantInfo(TRANSCRIPT))
+  );
+
+  // Case 2: lastAssistantInfo returns null with no usage block at all.
+  fs.writeFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } }) + '\n');
+  check(
+    'lastAssistantInfo is null when the transcript has no usage block',
+    transcript.lastAssistantInfo(TRANSCRIPT) === null
+  );
+
+  // Case 3: effort absent -> null (older-build transcripts).
+  writeTranscript(40000);
+  {
+    const info = transcript.lastAssistantInfo(TRANSCRIPT);
+    check('effort is null when absent from the transcript', !!info && info.effort === null, JSON.stringify(info));
+  }
+
+  // Case 4: arm.js stamps model/effort/contextTokens/chainId into state.
+  writeTranscript(50000, { model: 'claude-opus-4-8', effort: 'high' });
+  {
+    const r = runScript('arm.js', {
+      session_id: 'stamp-identity',
+      transcript_path: TRANSCRIPT,
+      cwd: SANDBOX,
+      hook_event_name: 'Stop',
+    });
+    const s = sessionState('stamp-identity');
+    check('arm exits 0 stamping identity', r.status === 0, r.stderr);
+    check('state records the model', !!s && s.model === 'claude-opus-4-8', s && s.model);
+    check('state records the effort', !!s && s.effort === 'high', s && s.effort);
+    check('state records contextTokens', !!s && s.contextTokens === 50000, s && String(s.contextTokens));
+    check(
+      'state records a non-empty chainId',
+      !!s && typeof s.chainId === 'string' && s.chainId.length > 0,
+      s && s.chainId
+    );
+    killTimer(s && s.timerPid);
+  }
+
+  cli(['set', 'action', 'keepalive']);
+
+  // Case 5: chainId is carried across a confirmed re-arm.
+  writeTranscript(50000);
+  {
+    runScript('arm.js', {
+      session_id: 'chain-carry',
+      transcript_path: TRANSCRIPT,
+      cwd: SANDBOX,
+      hook_event_name: 'Stop',
+    });
+    const before = sessionState('chain-carry');
+    killTimer(before && before.timerPid);
+    markFired('chain-carry', { ok: true });
+    const r = runScript('arm.js', {
+      session_id: 'chain-carry',
+      transcript_path: TRANSCRIPT,
+      cwd: SANDBOX,
+      hook_event_name: 'Stop',
+    });
+    const after = sessionState('chain-carry');
+    check('re-arm exits 0 (chain carry)', r.status === 0, r.stderr);
+    check(
+      'chainId is carried forward across a confirmed re-arm',
+      !!before && !!after && after.chainId === before.chainId,
+      JSON.stringify({ before: before && before.chainId, after: after && after.chainId })
+    );
+    check('pingCount increments on the carried chain', !!after && after.pingCount === 1, after && String(after.pingCount));
+    killTimer(after && after.timerPid);
+  }
+
+  // Case 6: chainId resets when the chain breaks (mode flips mid-chain, §3.1).
+  writeTranscript(50000);
+  {
+    runScript('arm.js', {
+      session_id: 'chain-break',
+      transcript_path: TRANSCRIPT,
+      cwd: SANDBOX,
+      hook_event_name: 'Stop',
+    });
+    const before = sessionState('chain-break');
+    killTimer(before && before.timerPid);
+    markFired('chain-break', { ok: true });
+    cli(['set', 'action', 'compact']);
+    const r = runScript('arm.js', {
+      session_id: 'chain-break',
+      transcript_path: TRANSCRIPT,
+      cwd: SANDBOX,
+      hook_event_name: 'Stop',
+    });
+    const after = sessionState('chain-break');
+    check('re-arm exits 0 (chain break)', r.status === 0, r.stderr);
+    check(
+      'chainId differs when the mode flips mid-chain',
+      !!before && !!after && after.chainId !== before.chainId,
+      JSON.stringify({ before: before && before.chainId, after: after && after.chainId })
+    );
+    check('pingCount resets to 0 when the chain breaks', !!after && after.pingCount === 0, after && String(after.pingCount));
+    killTimer(after && after.timerPid);
+  }
+
+  // Case 7: record() with no meta writes exactly today's legacy key set.
+  cli(['stats', 'reset']);
+  {
+    const line = statsCall(
+      "stats.record('meta-omitted', { ok: true, reason: null, detail: null });\n" +
+        'const rows = stats.readAll();\n' +
+        'process.stdout.write(JSON.stringify(rows[rows.length - 1]));'
+    );
+    check(
+      'record() with no meta writes exactly {at, sessionId, ok, reason, detail}',
+      line &&
+        !line.__error &&
+        Object.keys(line).sort().join(',') === ['at', 'detail', 'ok', 'reason', 'sessionId'].sort().join(','),
+      JSON.stringify(line)
+    );
+  }
+
+  // Case 8: recordPing() hit records measured tokens from cache_read_input_tokens.
+  {
+    const line = statsCall(
+      "stats.recordPing('ping-hit-case', 'hit', { chainId: 'c8', model: 'claude-sonnet-5', effort: 'xhigh', usage: { cache_read_input_tokens: 50000, cache_creation_input_tokens: 10 } });\n" +
+        'const rows = stats.readPings();\n' +
+        'process.stdout.write(JSON.stringify(rows[rows.length - 1]));'
+    );
+    check('recordPing hit records the measured cache_read_input_tokens value', !!line && line.tokens === 50000, JSON.stringify(line));
+    check('recordPing hit basis is measured', !!line && line.basis === 'measured', JSON.stringify(line));
+  }
+
+  // Case 9: recordPing() miss records zero protected, carries cacheCreationTokens through.
+  {
+    const line = statsCall(
+      "stats.recordPing('ping-miss-case', 'miss', { chainId: 'c9', usage: { cache_read_input_tokens: 5, cache_creation_input_tokens: 40000 } });\n" +
+        'const rows = stats.readPings();\n' +
+        'process.stdout.write(JSON.stringify(rows[rows.length - 1]));'
+    );
+    check('recordPing miss records zero protected tokens', !!line && line.tokens === 0, JSON.stringify(line));
+    check('recordPing miss carries cacheCreationTokens through verbatim', !!line && line.cacheCreationTokens === 40000, JSON.stringify(line));
+  }
+
+  // Case 10: THE load-bearing assertion — a chain collapses to its max, not its sum.
+  cli(['stats', 'reset']);
+  {
+    const chainId = 'chain-10';
+    [100, 900, 300, 900, 200].forEach((tok, i) => {
+      appendPingRow({
+        at: 10000 + i,
+        sessionId: 'sess-10',
+        result: 'hit',
+        chainId,
+        tokens: tok,
+        model: 'claude-sonnet-5',
+        effort: 'xhigh',
+        basis: 'measured',
+      });
+    });
+    const savings = JSON.parse(cli(['stats', '--json']).stdout).savings;
+    const events = JSON.parse(cli(['log', '--json']).stdout).events;
+    const event = events.find((e) => e.chainKey === 'sess-10:' + chainId);
+    check('a five-ping chain collapses to one event', !!event, JSON.stringify(events));
+    check('the event value is the chain max, not the sum', !!event && event.tokens === 900, event && String(event.tokens));
+    check('the event counts all five pings', !!event && event.pings === 5, event && String(event.pings));
+    check(
+      'summarizeSavings().tokensProtected is the max (900), explicitly not the sum (2400)',
+      savings.tokensProtected === 900,
+      String(savings.tokensProtected)
+    );
+  }
+
+  // Case 11: two distinct chainIds in one session stay separate events.
+  cli(['stats', 'reset']);
+  {
+    appendPingRow({ at: 11000, sessionId: 'sess-11', result: 'hit', chainId: 'chain-11a', tokens: 500, model: 'claude-sonnet-5', basis: 'measured' });
+    appendPingRow({ at: 11001, sessionId: 'sess-11', result: 'hit', chainId: 'chain-11b', tokens: 700, model: 'claude-sonnet-5', basis: 'measured' });
+    const savings = JSON.parse(cli(['stats', '--json']).stdout).savings;
+    check('two distinct chainIds yield two events', savings.events === 2, String(savings.events));
+    check('tokensProtected sums the two chain maxima', savings.tokensProtected === 1200, String(savings.tokensProtected));
+  }
+
+  // Case 12: a chain of only misses is an empty chain, not a zero-token event.
+  cli(['stats', 'reset']);
+  {
+    appendPingRow({ at: 12000, sessionId: 'sess-12', result: 'miss', chainId: 'chain-12', tokens: 0, cacheCreationTokens: 10000, model: 'claude-sonnet-5', basis: 'measured' });
+    appendPingRow({ at: 12001, sessionId: 'sess-12', result: 'miss', chainId: 'chain-12', tokens: 0, cacheCreationTokens: 12000, model: 'claude-sonnet-5', basis: 'measured' });
+    const savings = JSON.parse(cli(['stats', '--json']).stdout).savings;
+    check('an all-miss chain reports zero savings events', savings.events === 0, String(savings.events));
+    check('an all-miss chain is counted as an empty chain', savings.emptyChains === 1, String(savings.emptyChains));
+  }
+
+  // Case 13: rows with no chainId (pre-upgrade) do not merge.
+  cli(['stats', 'reset']);
+  {
+    appendPingRow({ at: 13000, sessionId: 'sess-13', result: 'hit', tokens: 300, model: 'claude-sonnet-5', basis: 'measured' });
+    appendPingRow({ at: 13001, sessionId: 'sess-13', result: 'hit', tokens: 400, model: 'claude-sonnet-5', basis: 'measured' });
+    const savings = JSON.parse(cli(['stats', '--json']).stdout).savings;
+    check('legacy ping rows with no chainId do not merge into one event', savings.events === 2, String(savings.events));
+  }
+
+  // Case 14: keepalive-exhausted is excluded from savings but still counted by summarize().ok.
+  cli(['stats', 'reset']);
+  {
+    appendFireRow({
+      at: 14000,
+      sessionId: 'sess-14',
+      ok: true,
+      reason: 'keepalive-exhausted',
+      detail: 'pings:12',
+      mode: 'keepalive',
+      chainId: 'chain-14',
+      tokens: 50000,
+      model: 'claude-sonnet-5',
+    });
+    const savings = JSON.parse(cli(['stats', '--json']).stdout).savings;
+    const legacy = JSON.parse(cli(['stats', '--json']).stdout).stats;
+    check('summarizeSavings excludes a keepalive-exhausted row', savings.events === 0, String(savings.events));
+    check(
+      "summarize().ok still counts it, pinning the deliberate divergence from summarizeSavings()",
+      legacy.ok === 1,
+      String(legacy.ok)
+    );
+  }
+
+  // Case 15: a disarmed arm (never fired) emits nothing to fires.log.
+  cli(['stats', 'reset']);
+  writeTranscript(50000);
+  {
+    const r = runScript('arm.js', { session_id: 'sess-15', transcript_path: TRANSCRIPT, cwd: SANDBOX, hook_event_name: 'Stop' });
+    check('arm exits 0 (case 15 setup)', r.status === 0, r.stderr);
+    const s = sessionState('sess-15');
+    killTimer(s && s.timerPid);
+    runScript('disarm.js', { session_id: 'sess-15', hook_event_name: 'UserPromptSubmit', prompt: 'hello there' });
+    const fires = readRawLog(FIRES_LOG);
+    check('disarming an armed session before it fires writes no fires.log line', !fires.some((e) => e.sessionId === 'sess-15'), JSON.stringify(fires));
+  }
+
+  // Case 16: disarm.js writes no savings row on a chain close (§2.5 regression guard).
+  cli(['set', 'action', 'keepalive']);
+  cli(['stats', 'reset']);
+  writeTranscript(50000);
+  {
+    runScript('arm.js', { session_id: 'sess-16', transcript_path: TRANSCRIPT, cwd: SANDBOX, hook_event_name: 'Stop' });
+    let s = sessionState('sess-16');
+    killTimer(s && s.timerPid);
+    markFired('sess-16', { ok: true });
+    runScript('arm.js', { session_id: 'sess-16', transcript_path: TRANSCRIPT, cwd: SANDBOX, hook_event_name: 'Stop' });
+    s = sessionState('sess-16');
+    killTimer(s && s.timerPid);
+    const beforeFires = readRawLog(FIRES_LOG).length;
+    const beforePings = readRawLog(PINGS_LOG).length;
+    runScript('disarm.js', { session_id: 'sess-16', hook_event_name: 'UserPromptSubmit', prompt: 'ok thanks' });
+    check('disarm.js on a live keepalive chain writes no fires.log line', readRawLog(FIRES_LOG).length === beforeFires);
+    check('disarm.js on a live keepalive chain writes no pings.log line', readRawLog(PINGS_LOG).length === beforePings);
+    check('disarm.js removes the state file', sessionState('sess-16') === null);
+  }
+  cli(['set', 'action', 'compact']);
+
+  // Case 17: byModel aggregates events/tokens per model; a null model lands under (unknown).
+  cli(['stats', 'reset']);
+  {
+    appendPingRow({ at: 17000, sessionId: 's17a', result: 'hit', chainId: 'c17a', tokens: 1000, model: 'claude-sonnet-5', basis: 'measured' });
+    appendPingRow({ at: 17001, sessionId: 's17b', result: 'hit', chainId: 'c17b', tokens: 2000, model: 'claude-sonnet-5', basis: 'measured' });
+    appendFireRow({ at: 17002, sessionId: 's17c', ok: true, reason: null, detail: null, mode: 'compact', chainId: 'c17c', tokens: 3000, model: 'claude-opus-4-8' });
+    appendFireRow({ at: 17003, sessionId: 's17d', ok: true, reason: null, detail: null, mode: 'compact', chainId: 'c17d', tokens: 4000, model: null });
+    const savings = JSON.parse(cli(['stats', '--json']).stdout).savings;
+    check(
+      'byModel aggregates the first model (two chains)',
+      !!savings.byModel['claude-sonnet-5'] && savings.byModel['claude-sonnet-5'].events === 2 && savings.byModel['claude-sonnet-5'].tokens === 3000,
+      JSON.stringify(savings.byModel)
+    );
+    check(
+      'byModel aggregates the second model separately',
+      !!savings.byModel['claude-opus-4-8'] && savings.byModel['claude-opus-4-8'].events === 1 && savings.byModel['claude-opus-4-8'].tokens === 3000,
+      JSON.stringify(savings.byModel)
+    );
+    check(
+      'a null model lands under (unknown)',
+      !!savings.byModel['(unknown)'] && savings.byModel['(unknown)'].events === 1 && savings.byModel['(unknown)'].tokens === 4000,
+      JSON.stringify(savings.byModel)
+    );
+  }
+
+  // Case 18: old log lines with no tokens key abstain rather than counting as zero.
+  cli(['stats', 'reset']);
+  {
+    appendFireRow({ at: 18000, sessionId: 's18', ok: true, reason: null, detail: null });
+    const savings = JSON.parse(cli(['stats', '--json']).stdout).savings;
+    check('a legacy row with no tokens key increments eventsMissingTokens', savings.eventsMissingTokens === 1, String(savings.eventsMissingTokens));
+    check('a legacy row with no tokens key does not add to tokensProtected', savings.tokensProtected === 0, String(savings.tokensProtected));
+  }
+
+  // Case 19: log with nothing recorded prints the empty-state message.
+  cli(['stats', 'reset']);
+  check('log with nothing recorded prints the empty message', /no idle compaction events recorded yet/.test(cli(['log']).stdout));
+
+  // Case 20: log returns at most 10 chain events, newest first by lastAt.
+  cli(['stats', 'reset']);
+  {
+    for (let i = 0; i < 13; i++) {
+      appendFireRow({ at: 20000 + i, sessionId: 'sess-20-' + i, ok: true, reason: null, detail: null, mode: 'compact', chainId: 'c20-' + i, tokens: 100 + i, model: 'claude-sonnet-5' });
+    }
+    const events = JSON.parse(cli(['log', '--json']).stdout).events;
+    check('log returns at most 10 events', events.length === 10, String(events.length));
+    check(
+      'log is ordered newest first by lastAt',
+      events.length === 10 && events[0].lastAt === 20012 && events[9].lastAt === 20003,
+      JSON.stringify(events.map((e) => e.lastAt))
+    );
+  }
+
+  // Case 21: log shows x<n> only for multi-ping chains.
+  cli(['stats', 'reset']);
+  {
+    for (let i = 0; i < 5; i++) {
+      appendPingRow({ at: 21000 + i, sessionId: 'sess-21a', result: 'hit', chainId: 'c21a', tokens: 100 + i, model: 'claude-sonnet-5' });
+    }
+    appendFireRow({ at: 21100, sessionId: 'sess-21b', ok: true, reason: null, detail: null, mode: 'compact', chainId: 'c21b', tokens: 5000, model: 'claude-sonnet-5' });
+    const events = JSON.parse(cli(['log', '--json']).stdout).events;
+    const chainA = events.find((e) => e.sessionId === 'sess-21a');
+    const chainB = events.find((e) => e.sessionId === 'sess-21b');
+    check('a 5-ping chain has pings === 5', !!chainA && chainA.pings === 5, chainA && String(chainA.pings));
+    check('a compact fire has pings === 1', !!chainB && chainB.pings === 1, chainB && String(chainB.pings));
+    const text = cli(['log']).stdout;
+    const lineA = text.split('\n').find((l) => l.indexOf('sess-21a') !== -1);
+    const lineB = text.split('\n').find((l) => l.indexOf('sess-21b') !== -1);
+    check('log renders x5 for the 5-ping chain', !!lineA && /x5\s*$/.test(lineA), lineA);
+    check('log renders no ping-count column for the compact fire', !!lineB && !/x\d+\s*$/.test(lineB), lineB);
+  }
+
+  // Case 22: log <number> bounds — log 3 returns 3, log 0 and log 500 exit 1.
+  cli(['stats', 'reset']);
+  {
+    for (let i = 0; i < 5; i++) {
+      appendFireRow({ at: 22000 + i, sessionId: 'sess-22-' + i, ok: true, reason: null, detail: null, mode: 'compact', chainId: 'c22-' + i, tokens: 100, model: 'claude-sonnet-5' });
+    }
+    const events = JSON.parse(cli(['log', '3', '--json']).stdout).events;
+    check('log 3 returns 3 events', events.length === 3, String(events.length));
+    check('log 0 exits 1', cli(['log', '0']).status === 1);
+    check('log 500 exits 1', cli(['log', '500']).status === 1);
+  }
+
+  // Case 23: log all shows raw rows, including failures and individual pings a chain collapses.
+  cli(['stats', 'reset']);
+  {
+    appendFireRow({ at: 23000, sessionId: 'sess-23-fail', ok: false, reason: 'inject-failed', detail: 'no-provider' });
+    for (let i = 0; i < 3; i++) {
+      appendPingRow({ at: 23100 + i, sessionId: 'sess-23-chain', result: 'hit', chainId: 'c23', tokens: 100 + i, model: 'claude-sonnet-5' });
+    }
+    const all = JSON.parse(cli(['log', 'all', '--json']).stdout).events;
+    check('log all includes a failed row that plain log omits', all.some((e) => e.sessionId === 'sess-23-fail'), JSON.stringify(all));
+    const plain = JSON.parse(cli(['log', '--json']).stdout).events;
+    check('plain log omits the failed row', !plain.some((e) => e.sessionId === 'sess-23-fail'), JSON.stringify(plain));
+    check(
+      'log all includes individual pings from a chain that log collapses',
+      all.filter((e) => e.sessionId === 'sess-23-chain').length === 3,
+      JSON.stringify(all)
+    );
+  }
+
+  // Case 24: log --json exits 0 and parses.
+  {
+    const r = cli(['log', '--json']);
+    check('log --json exits 0', r.status === 0, r.stderr);
+    check(
+      'log --json parses',
+      (() => {
+        try {
+          JSON.parse(r.stdout);
+          return true;
+        } catch (_) {
+          return false;
+        }
+      })()
+    );
+  }
+
+  // Case 25: stats prints the savings block when events exist, the empty line otherwise, never the old note.
+  cli(['stats', 'reset']);
+  {
+    appendFireRow({ at: 25000, sessionId: 'sess-25', ok: true, reason: null, detail: null, mode: 'compact', chainId: 'c25', tokens: 8000, model: 'claude-sonnet-5' });
+    const withEvents = cli(['stats']).stdout;
+    check('stats prints the savings block when events exist', /idle events:/.test(withEvents) && /tokens protected:/.test(withEvents), withEvents);
+    check('stats never prints the old double-counting note', !/note:/.test(withEvents), withEvents);
+
+    cli(['stats', 'reset']);
+    const noEvents = cli(['stats']).stdout;
+    check('stats prints the empty-savings line when none exist', /no token-savings events recorded yet/.test(noEvents), noEvents);
+    check('stats (empty) never prints the old double-counting note', !/note:/.test(noEvents), noEvents);
+  }
+
+  // Case 26: stats reset clears pings.log too.
+  {
+    appendFireRow({ at: 26000, sessionId: 'sess-26', ok: true, reason: null, detail: null, mode: 'compact', chainId: 'c26', tokens: 9000, model: 'claude-sonnet-5' });
+    appendPingRow({ at: 26001, sessionId: 'sess-26', result: 'hit', chainId: 'c26', tokens: 500, model: 'claude-sonnet-5' });
+    check('stats reset reports cleared', /compaction stats cleared/.test(cli(['stats', 'reset']).stdout));
+    check('stats reset removes fires.log', !fs.existsSync(FIRES_LOG));
+    check('stats reset removes pings.log', !fs.existsSync(PINGS_LOG));
+    const savings = JSON.parse(cli(['stats', '--json']).stdout).savings;
+    check('stats reset leaves summarizeSavings with zero events', savings.events === 0, String(savings.events));
+  }
+
+  cli(['stats', 'reset']);
 }
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
