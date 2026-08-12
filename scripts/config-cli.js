@@ -441,7 +441,13 @@ function main() {
 
     case 'paths': {
       const cfg = config.resolve();
-      const root = cfg.pluginRoot || path.resolve(__dirname, '..');
+      // A recorded root can outlive the copy it named, so the running copy
+      // wins whenever the recorded one no longer holds the CLI.
+      const recorded = cfg.pluginRoot;
+      const root =
+        recorded && fs.existsSync(path.join(recorded, 'scripts', 'config-cli.js'))
+          ? recorded
+          : path.resolve(__dirname, '..');
       const node = cfg.nodePath || process.execPath;
       return out('node: ' + node + '\nroot: ' + root, { ok: true, nodePath: node, pluginRoot: root });
     }

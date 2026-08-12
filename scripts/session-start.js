@@ -7,11 +7,51 @@
 //      through choosing an idle threshold. Claude Code has no interactive
 //      install hook, so first-session prompting is the closest equivalent.
 
+const fs = require('fs');
 const path = require('path');
 
 const config = require('./lib/config');
 const state = require('./lib/state');
 const { readInput, emit } = require('./lib/hookio');
+
+const PLUGIN_ROOT = path.resolve(__dirname, '..');
+
+function versionOf(root) {
+  try {
+    const manifest = path.join(root, '.claude-plugin', 'plugin.json');
+    return String(JSON.parse(fs.readFileSync(manifest, 'utf8')).version || '');
+  } catch (_) {
+    return '';
+  }
+}
+
+function compareVersions(a, b) {
+  const left = String(a).split('.');
+  const right = String(b).split('.');
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const x = Number(left[i]);
+    const y = Number(right[i]);
+    const cx = Number.isFinite(x) ? x : 0;
+    const cy = Number.isFinite(y) ? y : 0;
+    if (cx !== cy) return cx < cy ? -1 : 1;
+  }
+  return 0;
+}
+
+function usable(root) {
+  return !!root && fs.existsSync(path.join(root, 'scripts', 'config-cli.js'));
+}
+
+// Superseded plugin copies stay in the install cache and keep starting
+// sessions, so writing unconditionally lets an old version stamp its own path
+// over the live one's. Yield only to a recorded root that still exists and is
+// genuinely newer; an unknown version loses, which repairs configs written
+// before the version was recorded at all.
+function shouldRecordRoot(cfg) {
+  if (!usable(cfg.pluginRoot) || cfg.pluginRoot === PLUGIN_ROOT) return true;
+  const recorded = cfg.pluginVersion || versionOf(cfg.pluginRoot);
+  return compareVersions(versionOf(PLUGIN_ROOT), recorded) >= 0;
+}
 
 function sweep() {
   for (const file of state.listSessions()) {
@@ -74,10 +114,13 @@ async function main() {
   // Recorded so /idle-compact can find the plugin even if ${CLAUDE_PLUGIN_ROOT}
   // is not substituted inside a command body, and so it uses the same Node
   // binary the hooks run under rather than whatever `node` resolves to.
-  config.write({
-    pluginRoot: path.resolve(__dirname, '..'),
-    nodePath: process.execPath,
-  });
+  if (shouldRecordRoot(config.resolve())) {
+    config.write({
+      pluginRoot: PLUGIN_ROOT,
+      pluginVersion: versionOf(PLUGIN_ROOT),
+      nodePath: process.execPath,
+    });
+  }
 
   const cfg = config.resolve();
   if (cfg.setupCompleted) return;
