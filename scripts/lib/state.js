@@ -31,13 +31,16 @@ function readPath(file) {
   }
 }
 
-function write(sessionId, state) {
+function writePath(file, state) {
   config.ensureRoot();
-  const file = sessionFile(sessionId);
   const tmp = file + '.' + process.pid + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n');
   fs.renameSync(tmp, file);
   return file;
+}
+
+function write(sessionId, state) {
+  return writePath(sessionFile(sessionId), state);
 }
 
 function remove(sessionId) {
@@ -87,6 +90,7 @@ module.exports = {
   newArmId,
   read,
   readPath,
+  writePath,
   write,
   remove,
   killIfRunning,

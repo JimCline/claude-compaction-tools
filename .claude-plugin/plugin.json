@@ -1,6 +1,6 @@
 {
   "name": "idle-compactor",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Runs /compact automatically when a session goes idle, timed to land just before the Anthropic prompt cache expires — or, in keepalive mode, pings the cache instead of compacting.",
   "author": {
     "name": "Jim Cline",

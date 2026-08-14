@@ -6,7 +6,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const PLUGIN = path.resolve(__dirname, '..');
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), 'ic-test-'));
@@ -77,6 +77,29 @@ function writeTranscript(tokens, opts) {
   }
   for (const extra of o.extraLines || []) lines.push(JSON.stringify(extra));
   fs.writeFileSync(TRANSCRIPT, lines.join('\n') + '\n');
+}
+
+// writeTranscript() always stamps the OS mtime with the real write time, so
+// fixtures that need the timer to see an old-or-fresh transcript (the
+// now-relative QUIET_MS check timer.js runs) have to backdate it explicitly.
+function setTranscriptMtime(ageMs) {
+  const when = new Date(Date.now() - ageMs);
+  fs.utimesSync(TRANSCRIPT, when, when);
+}
+
+// Blocks the calling thread; this whole suite is synchronous, so a real sleep
+// (not a callback) is what lets a polling loop below coexist with it.
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function waitUntil(predicate, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    sleepMs(50);
+  }
+  return predicate();
 }
 
 function sessionState(sessionId) {
@@ -299,9 +322,29 @@ function runTimer(id, armId) {
   });
 }
 
+// A deferring timer never exits, so spawnSync (which blocks until the child
+// does) can't observe it — it would just run out its own timeout. This spawns
+// without blocking so the caller can poll disk state and kill the child once
+// it has seen what it needs.
+function runTimerBackground(id, armId, extraEnv) {
+  return spawn(process.execPath, [path.join(PLUGIN, 'scripts/timer.js'), statePath(id), armId], {
+    env: env(extraEnv),
+    stdio: 'ignore',
+  });
+}
+
+function killTimer(child) {
+  try {
+    process.kill(child.pid, 'SIGTERM');
+  } catch (_) {
+    /* already gone */
+  }
+}
+
 {
   const rec = seedState('fire-now');
   writeTranscript(50000);
+  setTranscriptMtime(10 * 60 * 1000); // outside SETTLE_MS with no pending tool_use, so this reaches real injection
   const r = runTimer('fire-now', rec.armId);
   const after = sessionState('fire-now');
   check('exits promptly when due', r.status === 0, r.stderr);
@@ -318,25 +361,278 @@ function runTimer(id, armId) {
 }
 
 {
-  // Armed long ago, transcript written just now => the session was active.
-  const rec = seedState('activity', { armedAt: Date.now() - 10 * 60 * 1000 });
-  writeTranscript(50000);
-  const r = runTimer('activity', rec.armId);
-  const after = sessionState('activity');
-  check('exits 0 when activity is detected', r.status === 0, r.stderr);
+  // The 64-minute-tool case: an assistant tool_use with no matching
+  // tool_result must defer no matter how stale the transcript's mtime is.
+  // Fixtures 1 and 2 are the matched pair from idle-rearm-spec.md Change D —
+  // same "silent a long time" surface, opposite required outcomes.
+  const rec = seedState('pending-tool', { armedAt: Date.now() - 40 * 60 * 1000 });
+  writeTranscript(50000, {
+    extraLines: [
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'toolu_pending_01', name: 'Bash', input: { command: 'sleep 1800' } }],
+        },
+        timestamp: new Date().toISOString(),
+      },
+    ],
+  });
+  setTranscriptMtime(30 * 60 * 1000);
+  const child = runTimerBackground('pending-tool', rec.armId);
+  const deferred = waitUntil(() => {
+    const s = sessionState('pending-tool');
+    return !!s && s.fireAt !== rec.fireAt;
+  }, 4000);
+  check('defers on a pending tool_use even with a 30-minute-stale mtime', deferred);
+  const afterPending = sessionState('pending-tool');
+  check('a pending-tool defer never sets fired', !!afterPending && afterPending.fired === null);
+  killTimer(child);
+}
+
+{
+  // Synthetic user-role bookkeeping — compaction receipts, slash-command
+  // echoes, interrupt markers — trails idle sessions constantly and is never
+  // a human awaiting a reply (see turnState's comment). A stale compaction
+  // receipt must fire, not defer forever the way awaiting-reply once did.
+  const rec = seedState('compaction-receipt', { armedAt: Date.now() - 20 * 60 * 1000 });
+  writeTranscript(50000, {
+    extraLines: [
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: '<local-command-stdout>[2mCompacted (ctrl+o to see full summary)[0m\n</local-command-stdout>',
+        },
+        timestamp: new Date().toISOString(),
+      },
+    ],
+  });
+  setTranscriptMtime(10 * 60 * 1000);
+  const r = runTimer('compaction-receipt', rec.armId);
+  const after = sessionState('compaction-receipt');
+  check('exits 0 reaching real injection', r.status === 0, r.stderr);
   check(
-    'aborts on post-arm transcript activity',
-    !!after && after.fired && after.fired.reason === 'activity-detected',
+    'a trailing compaction receipt is not a pending reply, so a stale session still fires',
+    !!after && after.fired && after.fired.reason !== 'activity-detected',
     JSON.stringify(after && after.fired)
   );
 }
 
 {
-  // Claude Code's own away_summary recap lands mid-window and bumps the file's
-  // mtime. The user never touched anything, so the timer must still fire.
+  // Closed turn, but the transcript was just written: SETTLE_MS is a race
+  // guard against a burst of closing writes, not an activity signal in its
+  // own right.
+  const rec = seedState('settle-guard', { armedAt: Date.now() - 5 * 60 * 1000 });
+  writeTranscript(50000);
+  const child = runTimerBackground('settle-guard', rec.armId);
+  const deferred = waitUntil(() => {
+    const s = sessionState('settle-guard');
+    return !!s && s.fireAt !== rec.fireAt;
+  }, 4000);
+  check('defers on a closed turn whose mtime is still inside SETTLE_MS', deferred);
+  killTimer(child);
+}
+
+{
+  // A type:"user" entry carrying a tool_result is the agent's own tool
+  // execution, not a user turn — guards the step-3 misclassification
+  // directly.
+  const rec = seedState('tool-result-closes-turn', { armedAt: Date.now() - 20 * 60 * 1000 });
+  writeTranscript(50000, {
+    extraLines: [
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'toolu_closed_01', name: 'Bash', input: { command: 'ls' } }],
+        },
+        timestamp: new Date().toISOString(),
+      },
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_closed_01', content: 'file1\nfile2' }],
+        },
+        timestamp: new Date().toISOString(),
+      },
+    ],
+  });
+  setTranscriptMtime(10 * 60 * 1000);
+  const r = runTimer('tool-result-closes-turn', rec.armId);
+  const after = sessionState('tool-result-closes-turn');
+  check('exits 0 reaching real injection', r.status === 0, r.stderr);
+  check(
+    'a tool_result-carrying user entry is not a user turn, so a closed exchange still fires',
+    !!after && after.fired && after.fired.reason !== 'activity-detected',
+    JSON.stringify(after && after.fired)
+  );
+}
+
+{
+  // Repeated defer, one stats row — retriggered via a pending tool_use
+  // rather than a fresh mtime, so this exercises the turn-completeness path
+  // specifically (mtime stays well past SETTLE_MS throughout). Keeps ONE
+  // background process alive across two of its own real setInterval ticks
+  // (POLL_MS shrunk via IDLE_COMPACTOR_POLL_MS) instead of faking a second
+  // tick by respawning under a reused armId — arm.js always mints a fresh
+  // armId and spawns exactly one daemon per arm, so a second process ever
+  // sharing an armId isn't a state the real system reaches.
+  function fireLogRows(sessionId) {
+    let text;
+    try {
+      text = fs.readFileSync(path.join(SANDBOX, '.claude', 'idle-compactor', 'fires.log'), 'utf8');
+    } catch (_) {
+      return [];
+    }
+    return text
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l))
+      .filter((e) => e.sessionId === sessionId);
+  }
+  function activityRows() {
+    return fireLogRows('activity').filter((e) => e.reason === 'activity-detected');
+  }
+
+  const rec = seedState('activity', { armedAt: Date.now() - 10 * 60 * 1000 });
+  writeTranscript(50000, {
+    extraLines: [
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'toolu_repeat_01', name: 'Bash', input: { command: 'sleep 1800' } }],
+        },
+        timestamp: new Date().toISOString(),
+      },
+    ],
+  });
+  setTranscriptMtime(30 * 60 * 1000);
+  const child = runTimerBackground('activity', rec.armId, { IDLE_COMPACTOR_POLL_MS: '200' });
+
+  const deferred = waitUntil(() => {
+    const s = sessionState('activity');
+    return !!s && s.fireAt !== rec.fireAt;
+  }, 4000);
+  check('defers rather than firing while a tool_use is still pending', deferred);
+  check('the timer process is still alive after deferring', isAlive(child.pid));
+  const afterFirst = sessionState('activity');
+  check('fireAt advances on disk', !!afterFirst && afterFirst.fireAt > rec.fireAt, JSON.stringify(afterFirst));
+  check('armId is unchanged by a defer', !!afterFirst && afterFirst.armId === rec.armId);
+  check('armedAt is unchanged by a defer', !!afterFirst && afterFirst.armedAt === rec.armedAt);
+  check('a defer never sets fired', !!afterFirst && afterFirst.fired === null);
+  check('exactly one activity-detected row after the first defer', activityRows().length === 1, JSON.stringify(activityRows()));
+
+  // defer() itself pushes fireAt a full idle window out, so a second real
+  // tick only becomes observable within the test's window by resetting the
+  // deadline on disk (the same direct-state-file technique other fixtures
+  // use) and letting this still-running process's own setInterval, not a
+  // respawn, notice it on its next real poll.
+  const dueAgain = Date.now() - 1000;
+  fs.writeFileSync(
+    statePath('activity'),
+    JSON.stringify(Object.assign({}, afterFirst, { fireAt: dueAgain }), null, 2) + '\n'
+  );
+  const deferredAgain = waitUntil(() => {
+    const s = sessionState('activity');
+    return !!s && s.fireAt !== dueAgain;
+  }, 4000);
+  check('a second real tick also reschedules rather than firing', deferredAgain);
+  const afterSecond = sessionState('activity');
+  check('fireAt advances again on the second tick', !!afterSecond && afterSecond.fireAt > dueAgain, JSON.stringify(afterSecond));
+  check('armId is still unchanged after a second tick', !!afterSecond && afterSecond.armId === rec.armId);
+  check(
+    'repeated defers converge: a second real tick writes no additional stats row',
+    activityRows().length === 1,
+    JSON.stringify(activityRows())
+  );
+  killTimer(child);
+}
+
+{
+  // Dedup-under-write-failure: the previous 'activity' fixture proves defer
+  // persistence across two real ticks, but with writes succeeding, the old
+  // record.deferred design also converges to one row there — the two
+  // designs only diverge once a state write fails mid-loop, which is the
+  // exact scenario Change F exists for. Chmod'ing the sessions directory
+  // (not the config root) induces that failure on disk while leaving
+  // fires.log, which lives directly under the config root, writable.
+  function fireLogRows(sessionId) {
+    let text;
+    try {
+      text = fs.readFileSync(path.join(SANDBOX, '.claude', 'idle-compactor', 'fires.log'), 'utf8');
+    } catch (_) {
+      return [];
+    }
+    return text
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l))
+      .filter((e) => e.sessionId === sessionId);
+  }
+  function activityRows() {
+    return fireLogRows('write-fail-dedup').filter((e) => e.reason === 'activity-detected');
+  }
+
+  const sessionsDir = path.join(SANDBOX, '.claude', 'idle-compactor', 'sessions');
+  const rec = seedState('write-fail-dedup', { armedAt: Date.now() - 10 * 60 * 1000 });
+  writeTranscript(50000, {
+    extraLines: [
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'toolu_write_fail_01', name: 'Bash', input: { command: 'sleep 1800' } }],
+        },
+        timestamp: new Date().toISOString(),
+      },
+    ],
+  });
+  setTranscriptMtime(30 * 60 * 1000);
+
+  // Blocked from before the very first tick, not after: a write that
+  // succeeds even once persists deferred/deferLogged's on-disk mirror
+  // durably regardless of which design is in place, so the two designs only
+  // diverge if the deadline is already due, and the write already blocked,
+  // the first time defer() ever runs.
+  fs.chmodSync(sessionsDir, 0o555);
+  const child = runTimerBackground('write-fail-dedup', rec.armId, { IDLE_COMPACTOR_POLL_MS: '200' });
+
+  try {
+    // Every write fails, so fireAt never advances on disk and nothing there
+    // is waitable — this just lets several overridden-length polls elapse
+    // and checks what landed. Reads still work: chmod 0o555 keeps the
+    // directory readable and traversable, it only blocks writes into it.
+    sleepMs(1200);
+
+    check('the timer process survives a state write blocked from the first tick', isAlive(child.pid));
+    const after = sessionState('write-fail-dedup');
+    check(
+      'a permanently blocked write leaves fireAt exactly as seeded, since no write ever succeeds',
+      !!after && after.fireAt === rec.fireAt,
+      JSON.stringify(after)
+    );
+    check(
+      'repeated ticks over a blocked write still log only one row, not one per tick',
+      activityRows().length === 1,
+      JSON.stringify(activityRows())
+    );
+  } finally {
+    fs.chmodSync(sessionsDir, 0o755);
+    killTimer(child);
+  }
+}
+
+{
+  // Regression test for the reported incident: Claude Code's own away_summary
+  // recap lands mid-window and bumps the transcript's mtime, but the actual
+  // exchange closed before it — no pending tool_use, and the last real turn
+  // is the assistant's — so the timer must still fire instead of deferring
+  // forever on a lone bookkeeping write.
   const rec = seedState('system-noise', { armedAt: Date.now() - 10 * 60 * 1000 });
   writeTranscript(50000, {
-    userTimestamp: Date.now() - 11 * 60 * 1000,
     extraLines: [
       {
         type: 'system',
@@ -348,32 +644,18 @@ function runTimer(id, armId) {
       },
     ],
   });
+  setTranscriptMtime(10 * 60 * 1000);
   const r = runTimer('system-noise', rec.armId);
   const after = sessionState('system-noise');
-  check('exits 0 on a system-only transcript write', r.status === 0, r.stderr);
+  check('exits 0 reaching real injection', r.status === 0, r.stderr);
   check(
-    'does not treat a system entry as user activity',
+    'the 5-hour-idle regression: a stale bookkeeping-only write still fires rather than deferring forever',
     !!after && after.fired && after.fired.reason !== 'activity-detected',
     JSON.stringify(after && after.fired)
   );
   check(
-    'proceeds to fire after a system-only write',
+    'proceeds to fire after a stale system-only write',
     !!after && after.fired && after.fired.ok === false,
-    JSON.stringify(after && after.fired)
-  );
-}
-
-{
-  // No parseable timestamp on the newest user turn: we cannot tell whether the
-  // user came back, so the conservative answer is to skip the compaction.
-  const rec = seedState('stale-stamp', { armedAt: Date.now() - 10 * 60 * 1000 });
-  writeTranscript(50000, { omitUserTimestamp: true });
-  const r = runTimer('stale-stamp', rec.armId);
-  const after = sessionState('stale-stamp');
-  check('exits 0 when user activity is indeterminate', r.status === 0, r.stderr);
-  check(
-    'skips the fire when the last user turn cannot be dated',
-    !!after && after.fired && after.fired.detail === 'indeterminate',
     JSON.stringify(after && after.fired)
   );
 }
@@ -596,14 +878,16 @@ console.log('\nmalformed input');
 // ---------------------------------------------------------------------------
 console.log('\nfire stats');
 {
-  // 'fire-now' and 'system-noise' (failed, no injection provider) and
-  // 'activity' and 'stale-stamp' (skipped, activity-detected) all fired
-  // earlier in this run; 'wrong-armid', 'dead-claude', and 'not-yet' never
-  // called finish() so left no record.
+  // finish()-based (failed, no injection provider): 'fire-now', 'system-noise',
+  // 'tool-result-closes-turn', 'compaction-receipt' -> 4. First-defer-based
+  // (activity-detected): 'pending-tool', 'settle-guard', 'activity' (its
+  // later defers add no row), 'write-fail-dedup' (its later blocked defers
+  // add no row either) -> 4. 'wrong-armid', 'dead-claude', and 'not-yet'
+  // never called finish() or defer() so left no record. Total: 8.
   const before = JSON.parse(cli(['stats', '--json']).stdout).stats;
-  check('counts every finish() as an attempt', before.totalAttempts === 4, JSON.stringify(before));
-  check('classifies the no-provider fire as failed', before.failed === 2, JSON.stringify(before));
-  check('classifies activity-detected as skipped, not failed', before.activitySkipped === 2, JSON.stringify(before));
+  check('counts every finish()/first-defer as an attempt', before.totalAttempts === 8, JSON.stringify(before));
+  check('classifies the no-provider fire as failed', before.failed === 4, JSON.stringify(before));
+  check('classifies activity-detected as skipped, not failed', before.activitySkipped === 4, JSON.stringify(before));
   check('an unfired session records nothing', !before.sessions['wrong-armid']);
   check('a dead-claude session records nothing', !before.sessions['dead-claude']);
   check('a not-yet-due session records nothing', !before.sessions['not-yet']);
@@ -624,13 +908,28 @@ console.log('\nfire stats');
     String(lastDetailFor('system-noise'))
   );
   check(
-    "'stale-stamp' aborted with an indeterminate last user turn",
-    lastDetailFor('stale-stamp') === 'indeterminate',
-    String(lastDetailFor('stale-stamp'))
+    "'tool-result-closes-turn' reached real injection, so detail is null",
+    lastDetailFor('tool-result-closes-turn') === null,
+    String(lastDetailFor('tool-result-closes-turn'))
   );
   check(
-    "'activity' aborted on a genuine, timestamped user turn",
-    lastDetailFor('activity') === 'user-turn',
+    "'pending-tool' deferred on an unmatched tool_use",
+    lastDetailFor('pending-tool') === 'pending-tool',
+    String(lastDetailFor('pending-tool'))
+  );
+  check(
+    "'compaction-receipt' reached real injection, so detail is null",
+    lastDetailFor('compaction-receipt') === null,
+    String(lastDetailFor('compaction-receipt'))
+  );
+  check(
+    "'settle-guard' deferred inside the SETTLE_MS race guard",
+    lastDetailFor('settle-guard') === 'settling',
+    String(lastDetailFor('settle-guard'))
+  );
+  check(
+    "'activity' deferred on an unmatched tool_use",
+    lastDetailFor('activity') === 'pending-tool',
     String(lastDetailFor('activity'))
   );
 

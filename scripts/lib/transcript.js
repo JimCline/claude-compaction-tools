@@ -3,9 +3,6 @@
 const fs = require('fs');
 
 const TAIL_BYTES = 512 * 1024;
-// A user turn can sit far behind the tail that carries the usage block: one
-// tool-heavy turn easily exceeds TAIL_BYTES on its own.
-const USER_SCAN_BYTES = 4 * 1024 * 1024;
 
 // Claude Code appends one JSON object per line. Only the tail matters: the
 // most recent assistant message carries the usage block that describes how
@@ -83,53 +80,6 @@ function contextTokens(file) {
   return info ? info.tokens : null;
 }
 
-// Claude Code writes several kinds of entry under type "user" that the human
-// never typed: tool results from an in-flight or background task, meta entries
-// injected by hooks and commands, and subagent sidechain traffic. Measured on a
-// real transcript, 74 of 120 "user" lines were tool results alone.
-function isUserTurn(entry) {
-  if (!entry || entry.type !== 'user') return false;
-  if (entry.isMeta === true) return false;
-  if (entry.isSidechain === true) return false;
-  if (entry.toolUseResult !== undefined) return false;
-  const message = entry.message;
-  if (!message || message.role !== 'user') return false;
-  const content = message.content;
-  if (
-    Array.isArray(content) &&
-    content.length > 0 &&
-    content.every((block) => block && block.type === 'tool_result')
-  ) {
-    return false;
-  }
-  return true;
-}
-
-// Epoch ms of the most recent genuine user turn in the transcript, or null when
-// that cannot be established. Callers must treat null as "assume the user is
-// active": the file's mtime moves for Claude Code's own bookkeeping (system
-// away_summary recaps, stop_hook_summary, turn_duration), so mtime alone cannot
-// answer whether the human came back.
-function lastUserTurnMs(file) {
-  const lines = readTailLines(file, USER_SCAN_BYTES);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line || line[0] !== '{') continue;
-    let entry;
-    try {
-      entry = JSON.parse(line);
-    } catch (_) {
-      continue;
-    }
-    if (!isUserTurn(entry)) continue;
-    const at = Date.parse(entry.timestamp);
-    // Stop at the newest user turn either way. Scanning further back would
-    // report a stale "last active hours ago" and fire into a live session.
-    return Number.isFinite(at) ? at : null;
-  }
-  return null;
-}
-
 function mtimeMs(file) {
   try {
     return fs.statSync(file).mtimeMs;
@@ -138,4 +88,53 @@ function mtimeMs(file) {
   }
 }
 
-module.exports = { lastAssistantInfo, lastUsage, contextTokens, lastUserTurnMs, mtimeMs };
+// Elapsed silence can't tell "finished" from "still working" — a build, a
+// test suite, or a subagent can leave the transcript quiet for over an hour
+// while the turn is very much open. Turn completeness can: a tool_use still
+// unanswered means the turn is open.
+function turnState(file) {
+  const lines = readTailLines(file);
+  const entries = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line[0] !== '{') continue;
+    try {
+      entries.push(JSON.parse(line));
+    } catch (_) {
+      continue;
+    }
+  }
+
+  // isSidechain is ignored here on purpose: an unanswered tool_use anywhere
+  // in the tail means something is still running, subagent or not, and
+  // treating that as idle is the failure mode this function exists to avoid.
+  // Scanning the whole tail for any unmatched use relies on Claude Code
+  // always writing a tool_result, even for an interrupted or cancelled call —
+  // an unmatched use means in-flight, never an abandoned orphan.
+  const used = new Set();
+  const resulted = new Set();
+  for (const entry of entries) {
+    const content = entry && entry.message && entry.message.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'tool_use' && block.id) used.add(block.id);
+      if (block.type === 'tool_result' && block.tool_use_id) resulted.add(block.tool_use_id);
+    }
+  }
+  for (const id of used) {
+    if (!resulted.has(id)) return { busy: true, why: 'pending-tool' };
+  }
+
+  // No "awaiting a genuine reply" branch: arm.js re-arms on every user prompt
+  // with a fresh armedAt and fireAt a full idle window out, so any user-role
+  // entry this function could still see is already older than the whole idle
+  // window — never someone waiting on a response. It also can't be told apart
+  // from synthetic user-role bookkeeping (compaction receipts, slash-command
+  // echoes, interrupt markers) that trails idle sessions constantly; treating
+  // any of that as a pending reply is what deferred a session forever after
+  // its first compaction.
+  return { busy: false };
+}
+
+module.exports = { lastAssistantInfo, lastUsage, contextTokens, mtimeMs, turnState };
